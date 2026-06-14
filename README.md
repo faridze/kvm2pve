@@ -2,7 +2,7 @@
 
 Low-downtime KVM/Virtualizor to Proxmox disk migration helper.
 
-This repository now uses the tested QMP workflow:
+This repository uses the tested QMP workflow:
 
 ```text
 blockdev-add target NBD node
@@ -12,7 +12,7 @@ blockdev-backup sync=incremental
 final incremental during cutover
 ```
 
-`drive_mirror` and old `virsh blockcopy --pivot` are not used in the new workflow.
+`drive_mirror`, old `virsh blockcopy --pivot`, and legacy wrapper files are not used.
 
 ## Status
 
@@ -31,40 +31,60 @@ Proof-of-concept validation completed:
 kvm2pve-src.sh                 Run on source Virtualizor/KVM host
 kvm2pve-dst.sh                 Run on destination Proxmox host
 examples/kvm2pve.env.example   Example shared config
-kvm2pve.sh                     Legacy wrapper notice
 ```
 
-## Quick start
+## Recommended start
 
-Copy the example config on both hosts:
+On the source host, run discovery with the VM name:
 
 ```bash
-cp examples/kvm2pve.env.example kvm2pve.env
+./kvm2pve-src.sh discover kvm3023
 ```
 
-Edit the basic values first:
+If `kvm2pve.env` does not exist, the script asks for the destination values first:
+
+```text
+Proxmox host/IP
+Destination VMID
+Destination disk path
+NBD port
+NBD export name
+```
+
+Then it reads:
 
 ```bash
-VM_NAME=kvm3023
-PVE_HOST=10.0.0.10
-PVE_VMID=2672
-PVE_DISK=/dev/pve/vm-2672-disk-0
+virsh qemu-monitor-command VM_NAME --hmp "info block"
 ```
 
-Then on the source host run discovery. It parses `virsh qemu-monitor-command VM --hmp "info block"`, shows the detected disk/device/node, and asks before writing them to `kvm2pve.env`:
+It auto-detects and shows:
+
+```text
+SRC_DISK
+QEMU_DEVICE
+QEMU_NODE
+```
+
+After confirmation, it writes those values to `kvm2pve.env`.
+
+You can also run without an argument and let it ask the VM name:
 
 ```bash
 ./kvm2pve-src.sh discover
 ```
 
-On destination Proxmox:
+## Destination Proxmox
+
+Copy or create the same `kvm2pve.env` on the destination host, then run:
 
 ```bash
 ./kvm2pve-dst.sh show
 ./kvm2pve-dst.sh export
 ```
 
-On source:
+## Source workflow
+
+After destination export is ready:
 
 ```bash
 ./kvm2pve-src.sh tunnel
@@ -90,8 +110,8 @@ Then on destination:
 ## Source commands
 
 ```bash
+./kvm2pve-src.sh discover [VM_NAME]
 ./kvm2pve-src.sh init
-./kvm2pve-src.sh discover
 ./kvm2pve-src.sh show
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh attach-target
@@ -128,19 +148,20 @@ Do not shut down the source VM before final incremental. If QEMU exits, QMP disa
 
 ```text
 1. Prepare destination VM disk on Proxmox
-2. Export destination disk with qemu-nbd
-3. Create SSH tunnel from source to destination NBD
-4. Add destination NBD as QEMU block node
-5. Create dirty bitmap on source disk node
-6. Run full sync while VM is running
-7. Wait until full sync completes
-8. Lock customer panel controls
-9. Suspend source VM
-10. Run final incremental
-11. Stop source VM
-12. Close qemu-nbd export
-13. Boot destination VM
-14. Validate guest services
+2. Run source discovery and confirm config
+3. Export destination disk with qemu-nbd
+4. Create SSH tunnel from source to destination NBD
+5. Add destination NBD as QEMU block node
+6. Create dirty bitmap on source disk node
+7. Run full sync while VM is running
+8. Wait until full sync completes
+9. Lock customer panel controls
+10. Suspend source VM
+11. Run final incremental
+12. Stop source VM
+13. Close qemu-nbd export
+14. Boot destination VM
+15. Validate guest services
 ```
 
 ## Monitoring without jq
