@@ -2,7 +2,7 @@
 # kvm2pve source-side helper
 set -Eeuo pipefail
 
-VERSION="0.2.2"
+VERSION="0.2.3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -39,6 +39,10 @@ EOF
 ask(){ local var="$1" prompt="$2" def="${3:-}" val; read -r -p "$prompt${def:+ [$def]}: " val; printf -v "$var" '%s' "${val:-$def}"; }
 confirm(){ local prompt="$1" ans; read -r -p "$prompt [yes/no]: " ans; [[ "$ans" == "yes" ]]; }
 
+sanitize_name(){ printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '-'; }
+default_bitmap(){ printf 'kvm2pve-bitmap-%s' "$(sanitize_name "$1")"; }
+default_target_node(){ printf 'kvm2pve-target-%s' "$(sanitize_name "$1")"; }
+
 load_config(){
   [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE. Run: ./kvm2pve-src.sh discover VM_NAME"
   # shellcheck disable=SC1090
@@ -47,8 +51,8 @@ load_config(){
   SRC_DISK="${SRC_DISK:-}"
   QEMU_DEVICE="${QEMU_DEVICE:-}"
   QEMU_NODE="${QEMU_NODE:-}"
-  BITMAP="${BITMAP:-kvm2pve}"
-  TARGET_NODE="${TARGET_NODE:-kvm2pve-target}"
+  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"
+  TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"
   NBD_PORT="${NBD_PORT:-10809}"
   NBD_EXPORT="${NBD_EXPORT:-$VM_NAME}"
   TUNNEL_MODE="${TUNNEL_MODE:-autossh}"
@@ -77,8 +81,8 @@ VM_NAME=$vm
 SRC_DISK=$src_disk
 QEMU_DEVICE=
 QEMU_NODE=
-BITMAP=kvm2pve
-TARGET_NODE=kvm2pve-target
+BITMAP=$(default_bitmap "$vm")
+TARGET_NODE=$(default_target_node "$vm")
 PVE_HOST=$pve_host
 PVE_SSH_USER=root
 PVE_SSH_PORT=$ssh_port
@@ -105,8 +109,8 @@ ensure_base_config(){
     [[ -n "$(get_conf NBD_EXPORT)" ]] || write_key NBD_EXPORT "$vm"
     [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
     [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
-    [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP kvm2pve
-    [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE kvm2pve-target
+    [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP "$(default_bitmap "$vm")"
+    [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE "$(default_target_node "$vm")"
   else
     vm="$vm_arg"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
@@ -119,8 +123,8 @@ VM_NAME=$vm
 SRC_DISK=
 QEMU_DEVICE=
 QEMU_NODE=
-BITMAP=kvm2pve
-TARGET_NODE=kvm2pve-target
+BITMAP=$(default_bitmap "$vm")
+TARGET_NODE=$(default_target_node "$vm")
 PVE_HOST=$pve_host
 PVE_SSH_USER=root
 PVE_SSH_PORT=$ssh_port
@@ -188,6 +192,10 @@ discover(){
   node="$(printf '%s' "$chosen" | awk -F '\t' '{print $2}')"
   disk="$(printf '%s' "$chosen" | awk -F '\t' '{print $3}')"
   size="$(blockdev --getsize64 "$disk" 2>/dev/null || stat -c %s "$disk" 2>/dev/null || echo unknown)"
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"
+  TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"
   cat <<EOF
 
 Detected values
@@ -199,6 +207,8 @@ Selected disk       : $disk
 QEMU device         : $device
 QEMU node           : $node
 Disk size           : $size
+Bitmap              : $BITMAP
+Target node         : $TARGET_NODE
 Proxmox             : ${PVE_SSH_USER}@${PVE_HOST}:${PVE_SSH_PORT}
 Proxmox VMID        : $PVE_VMID
 Proxmox disk        : $PVE_DISK
@@ -208,6 +218,8 @@ EOF
     write_key SRC_DISK "$disk"
     write_key QEMU_DEVICE "$device"
     write_key QEMU_NODE "$node"
+    write_key BITMAP "$BITMAP"
+    write_key TARGET_NODE "$TARGET_NODE"
     ok "Config updated: $CONFIG_FILE"
   else
     warn "Config not changed"
