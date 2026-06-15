@@ -167,7 +167,7 @@ Target node    : $TARGET_NODE
 Proxmox        : ${PVE_SSH_USER}@${PVE_HOST}:${PVE_SSH_PORT}
 Proxmox VMID   : $PVE_VMID
 Proxmox disk   : $PVE_DISK
-NBD            : localhost:${NBD_PORT}, export=${NBD_EXPORT}
+NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 Tunnel mode    : $TUNNEL_MODE
 EOF
 }
@@ -211,6 +211,26 @@ wait_jobs_empty(){
 
 bitmap_exists(){ load_config; qmp '{"execute":"query-block"}' | grep -q "\"name\": \"$BITMAP\""; }
 target_node_exists(){ load_config; qmp '{"execute":"query-named-block-nodes"}' 2>/dev/null | grep -q "\"node-name\": \"$TARGET_NODE\""; }
+
+verify_target_node(){
+  load_config
+
+  if ! target_node_exists; then
+    die "Target node verification failed: $TARGET_NODE not found"
+  fi
+
+  ok "Target node verified: $TARGET_NODE"
+}
+
+verify_bitmap(){
+  load_config
+
+  if ! bitmap_exists; then
+    die "Bitmap verification failed: $BITMAP not found on $QEMU_NODE"
+  fi
+
+  ok "Bitmap verified: $BITMAP"
+}
 
 discover(){
   local vm_arg="${1:-}" existing_disk out detected count chosen device node disk size
@@ -310,12 +330,17 @@ tunnel_status(){
 }
 
 attach_target(){
-  load_config; need virsh
+  load_config
+  need virsh
+
   if target_node_exists; then
     ok "Target node already exists: $TARGET_NODE"
+    verify_target_node
     return 0
   fi
+
   local out
+
   out="$(qmp '{
   "execute":"blockdev-add",
   "arguments":{
@@ -323,25 +348,47 @@ attach_target(){
     "driver":"raw",
     "file":{
       "driver":"nbd",
-      "server":{"type":"inet","host":"127.0.0.1","port":"'"$NBD_PORT"'"},
+      "server":{
+        "type":"inet",
+        "host":"127.0.0.1",
+        "port":"'"$NBD_PORT"'"
+      },
       "export":"'"$NBD_EXPORT"'"
     }
   }
 }')"
+
   printf '%s\n' "$out"
-  if printf '%s\n' "$out" | grep -q '"error"'; then die "blockdev-add failed"; fi
+
+  if printf '%s\n' "$out" | grep -q '"error"'; then
+    die "blockdev-add failed"
+  fi
+
+  verify_target_node
 }
 
 create_bitmap(){
-  load_config; [[ -n "$QEMU_NODE" ]] || die "QEMU_NODE is empty. Run discover first."
+  load_config
+
+  [[ -n "$QEMU_NODE" ]] || die "QEMU_NODE is empty. Run discover first."
+
   if bitmap_exists; then
     ok "Bitmap already exists: $BITMAP"
+    verify_bitmap
     return 0
   fi
+
   local out
+
   out="$(qmp '{"execute":"block-dirty-bitmap-add","arguments":{"node":"'"$QEMU_NODE"'","name":"'"$BITMAP"'"}}')"
+
   printf '%s\n' "$out"
-  if printf '%s\n' "$out" | grep -q '"error"'; then die "block-dirty-bitmap-add failed"; fi
+
+  if printf '%s\n' "$out" | grep -q '"error"'; then
+    die "block-dirty-bitmap-add failed"
+  fi
+
+  verify_bitmap
 }
 
 backup_job(){
