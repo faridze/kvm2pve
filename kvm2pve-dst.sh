@@ -2,7 +2,7 @@
 # kvm2pve destination-side helper for Proxmox
 set -Eeuo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -17,20 +17,34 @@ usage(){ cat <<EOF
 kvm2pve-dst.sh v${VERSION}
 
 Usage:
+  ./kvm2pve-dst.sh discover [VMID]
   ./kvm2pve-dst.sh init
   ./kvm2pve-dst.sh show
+  ./kvm2pve-dst.sh preflight
   ./kvm2pve-dst.sh export
   ./kvm2pve-dst.sh close
   ./kvm2pve-dst.sh boot
   ./kvm2pve-dst.sh status
+
+Recommended first run:
+  ./kvm2pve-dst.sh discover 2672
 EOF
 }
 
 ask(){ local var="$1" prompt="$2" def="${3:-}" val; read -r -p "$prompt${def:+ [$def]}: " val; printf -v "$var" '%s' "${val:-$def}"; }
 confirm(){ local prompt="$1" ans; read -r -p "$prompt [yes/no]: " ans; [[ "$ans" == "yes" ]]; }
 
+get_conf(){ local key="$1"; [[ -f "$CONFIG_FILE" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$CONFIG_FILE"; }
+write_key(){
+  local key="$1" val="$2" tmp
+  tmp="$(mktemp)"
+  [[ -f "$CONFIG_FILE" ]] && grep -v -E "^${key}=" "$CONFIG_FILE" > "$tmp" || true
+  printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+}
+
 load_config(){
-  [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE. Run: ./kvm2pve-dst.sh init"
+  [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE. Run: ./kvm2pve-dst.sh discover VMID"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
   : "${VM_NAME:?}"; : "${PVE_VMID:?}"; : "${PVE_DISK:?}"
@@ -56,6 +70,62 @@ EOF
   ok "Config written: $CONFIG_FILE"
 }
 
+vm_name_from_qm(){
+  local vmid="$1" name
+  name="$(qm config "$vmid" 2>/dev/null | awk -F': ' '$1=="name" {print $2; exit}')"
+  [[ -n "$name" ]] || name="kvm${vmid}"
+  printf '%s' "$name"
+}
+
+first_disk_from_qm(){
+  local vmid="$1" disk
+  disk="$(qm config "$vmid" 2>/dev/null | awk -F': ' '
+    $1 ~ /^(scsi|virtio|sata|ide)[0-9]+$/ {
+      split($2,a,",");
+      if (a[1] ~ /^\//) { print a[1]; exit }
+    }')"
+  printf '%s' "$disk"
+}
+
+discover_config(){
+  local vmid_arg="${1:-}" vmid vm_name disk nbd_port nbd_export
+  need qm
+  vmid="$vmid_arg"
+  [[ -n "$vmid" ]] || ask vmid "Destination Proxmox VMID" "2672"
+  qm config "$vmid" >/dev/null 2>&1 || warn "qm config failed for VMID $vmid; continuing with manual/default values"
+  vm_name="$(vm_name_from_qm "$vmid")"
+  disk="$(first_disk_from_qm "$vmid")"
+  [[ -n "$disk" ]] || disk="/dev/pve/vm-${vmid}-disk-0"
+  nbd_port="$(get_conf NBD_PORT)"; [[ -n "$nbd_port" ]] || nbd_port="10809"
+  nbd_export="$(get_conf NBD_EXPORT)"; [[ -n "$nbd_export" ]] || nbd_export="$vm_name"
+
+  cat <<EOF
+
+Detected destination values
+---------------------------
+Config file : $CONFIG_FILE
+VMID        : $vmid
+VM name     : $vm_name
+Disk        : $disk
+NBD port    : $nbd_port
+NBD export  : $nbd_export
+EOF
+
+  if confirm "Write these values to destination config?"; then
+    cat > "$CONFIG_FILE" <<EOF
+VM_NAME=$vm_name
+PVE_VMID=$vmid
+PVE_DISK=$disk
+NBD_PORT=$nbd_port
+NBD_EXPORT=$nbd_export
+EOF
+    chmod 600 "$CONFIG_FILE"
+    ok "Config written: $CONFIG_FILE"
+  else
+    warn "Config not changed"
+  fi
+}
+
 show_config(){
   load_config
   cat <<EOF
@@ -66,6 +136,16 @@ VMID           : $PVE_VMID
 Disk           : $PVE_DISK
 NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 EOF
+}
+
+port_in_use(){ ss -lntp | grep -q "127.0.0.1:${NBD_PORT}"; }
+
+preflight(){
+  load_config; need qm; need qemu-nbd; need ss
+  qm config "$PVE_VMID" >/dev/null 2>&1 || warn "VMID $PVE_VMID not found in qm; disk-only export may still work"
+  [[ -b "$PVE_DISK" || -f "$PVE_DISK" ]] || die "Destination disk not found: $PVE_DISK"
+  if port_in_use; then die "NBD port already in use: 127.0.0.1:${NBD_PORT}"; fi
+  ok "Destination preflight checks passed"
 }
 
 status(){
@@ -84,14 +164,14 @@ export_disk(){
   else
     warn "VMID $PVE_VMID not found by qm status; continuing with disk export only"
   fi
-  if ss -lntp | grep -q "127.0.0.1:${NBD_PORT}"; then
+  if port_in_use; then
     die "NBD port already in use: 127.0.0.1:${NBD_PORT}"
   fi
   pgrep -a qemu-nbd || true
   info "Starting qemu-nbd on 127.0.0.1:${NBD_PORT} export=${NBD_EXPORT} disk=${PVE_DISK}"
   qemu-nbd -t --fork -b 127.0.0.1 -p "$NBD_PORT" -x "$NBD_EXPORT" -f raw "$PVE_DISK"
   sleep 1
-  ss -lntp | grep -q "127.0.0.1:${NBD_PORT}" || die "qemu-nbd did not start"
+  port_in_use || die "qemu-nbd did not start"
   ok "NBD export is ready"
 }
 
@@ -110,10 +190,12 @@ boot_vm(){
   ok "Boot command sent for VMID $PVE_VMID"
 }
 
-cmd="${1:-}"
+cmd="${1:-}"; shift || true
 case "$cmd" in
+  discover) discover_config "${1:-}" ;;
   init) init_config ;;
   show) show_config ;;
+  preflight) preflight ;;
   export) export_disk ;;
   close) close_export ;;
   boot) boot_vm ;;
