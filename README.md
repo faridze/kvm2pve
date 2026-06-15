@@ -93,8 +93,13 @@ Source:
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh tunnel-status
 ./kvm2pve-src.sh tunnel-check
+
 ./kvm2pve-src.sh attach-target
+./kvm2pve-src.sh check-target
+
 ./kvm2pve-src.sh bitmap
+./kvm2pve-src.sh check-bitmap
+
 ./kvm2pve-src.sh full
 ./kvm2pve-src.sh watch
 ```
@@ -122,6 +127,8 @@ Destination:
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh tunnel-status
 ./kvm2pve-src.sh tunnel-check
+./kvm2pve-src.sh check-target
+./kvm2pve-src.sh check-bitmap
 ./kvm2pve-src.sh attach-target
 ./kvm2pve-src.sh bitmap
 ./kvm2pve-src.sh full

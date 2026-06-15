@@ -23,6 +23,8 @@ Usage:
   ./kvm2pve-src.sh preflight
   ./kvm2pve-src.sh tunnel
   ./kvm2pve-src.sh tunnel-check
+  ./kvm2pve-src.sh check-target
+  ./kvm2pve-src.sh check-bitmap
   ./kvm2pve-src.sh tunnel-status
   ./kvm2pve-src.sh attach-target
   ./kvm2pve-src.sh bitmap
@@ -230,6 +232,16 @@ verify_bitmap(){
   fi
 
   ok "Bitmap verified: $BITMAP"
+}
+
+check_target(){
+  load_config
+  verify_target_node
+}
+
+check_bitmap(){
+  load_config
+  verify_bitmap
 }
 
 discover(){
@@ -478,6 +490,8 @@ case "$cmd" in
   preflight) preflight ;;
   tunnel) start_tunnel ;;
   tunnel-check) tunnel_check ;;
+  check-target) check_target ;;
+  check-bitmap) check_bitmap ;;
   tunnel-status) tunnel_status ;;
   attach-target) attach_target ;;
   bitmap) create_bitmap ;;
