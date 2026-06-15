@@ -2,7 +2,7 @@
 # kvm2pve destination-side helper for Proxmox
 set -Eeuo pipefail
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -35,13 +35,6 @@ ask(){ local var="$1" prompt="$2" def="${3:-}" val; read -r -p "$prompt${def:+ [
 confirm(){ local prompt="$1" ans; read -r -p "$prompt [yes/no]: " ans; [[ "$ans" == "yes" ]]; }
 
 get_conf(){ local key="$1"; [[ -f "$CONFIG_FILE" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$CONFIG_FILE"; }
-write_key(){
-  local key="$1" val="$2" tmp
-  tmp="$(mktemp)"
-  [[ -f "$CONFIG_FILE" ]] && grep -v -E "^${key}=" "$CONFIG_FILE" > "$tmp" || true
-  printf '%s=%s\n' "$key" "$val" >> "$tmp"
-  mv "$tmp" "$CONFIG_FILE"
-}
 
 load_config(){
   [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE. Run: ./kvm2pve-dst.sh discover VMID"
@@ -77,14 +70,52 @@ vm_name_from_qm(){
   printf '%s' "$name"
 }
 
+lvm_path_for_lv(){
+  local lv="$1"
+  command -v lvs >/dev/null 2>&1 || return 0
+  lvs --noheadings -o vg_name,lv_name 2>/dev/null | awk -v lv="$lv" '$2==lv {print "/dev/" $1 "/" $2; exit}'
+}
+
+lvm_path_for_vmid(){
+  local vmid="$1"
+  command -v lvs >/dev/null 2>&1 || return 0
+  lvs --noheadings -o vg_name,lv_name 2>/dev/null | awk -v vmid="$vmid" '
+    $2 ~ ("^vm-" vmid "-") {print "/dev/" $1 "/" $2; exit}
+    $2 ~ vmid {fallback="/dev/" $1 "/" $2}
+    END {if (fallback != "") print fallback}'
+}
+
 first_disk_from_qm(){
-  local vmid="$1" disk
-  disk="$(qm config "$vmid" 2>/dev/null | awk -F': ' '
+  local vmid="$1" vol disk lv
+  vol="$(qm config "$vmid" 2>/dev/null | awk -F': ' '
     $1 ~ /^(scsi|virtio|sata|ide)[0-9]+$/ {
       split($2,a,",");
-      if (a[1] ~ /^\//) { print a[1]; exit }
+      print a[1];
+      exit
     }')"
-  printf '%s' "$disk"
+
+  if [[ -n "$vol" ]]; then
+    if [[ "$vol" == /* ]]; then
+      printf '%s' "$vol"
+      return 0
+    fi
+    if [[ "$vol" == *:* ]]; then
+      lv="${vol#*:}"
+      disk="$(lvm_path_for_lv "$lv")"
+      if [[ -n "$disk" ]]; then
+        printf '%s' "$disk"
+        return 0
+      fi
+    fi
+  fi
+
+  disk="$(lvm_path_for_vmid "$vmid")"
+  if [[ -n "$disk" ]]; then
+    printf '%s' "$disk"
+    return 0
+  fi
+
+  printf '/dev/pve/vm-%s-disk-0' "$vmid"
 }
 
 discover_config(){
@@ -95,7 +126,6 @@ discover_config(){
   qm config "$vmid" >/dev/null 2>&1 || warn "qm config failed for VMID $vmid; continuing with manual/default values"
   vm_name="$(vm_name_from_qm "$vmid")"
   disk="$(first_disk_from_qm "$vmid")"
-  [[ -n "$disk" ]] || disk="/dev/pve/vm-${vmid}-disk-0"
   nbd_port="$(get_conf NBD_PORT)"; [[ -n "$nbd_port" ]] || nbd_port="10809"
   nbd_export="$(get_conf NBD_EXPORT)"; [[ -n "$nbd_export" ]] || nbd_export="$vm_name"
 
