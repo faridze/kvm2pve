@@ -180,7 +180,7 @@ parse_info_block(){
   awk '
     /^[^[:space:]:]+[[:space:]]+\(#block[0-9]+\):/ {
       device=$1
-      node=$2; gsub(/[()]/,"",node)
+      node=$2; gsub(/[():]/,"",node)
       disk=$0; sub(/^[^:]+:[[:space:]]*/,"",disk); sub(/[[:space:]]+\([^)]+\).*$/,"",disk)
       print device "\t" node "\t" disk
     }
