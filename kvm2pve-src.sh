@@ -301,7 +301,7 @@ discover(){
   size="$(blockdev --getsize64 "$disk" 2>/dev/null || stat -c %s "$disk" 2>/dev/null || echo unknown)"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"; TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"; NBD_EXPORT="${NBD_EXPORT:-vm-${PVE_VMID}}"
+  BITMAP="${BITMAP:-$(default_bitmap "$VM_NAME")}"; TARGET_NODE="${TARGET_NODE:-$(default_target_node "$VM_NAME")}"; NBD_EXPORT="vm-${PVE_VMID}"
   cat <<EOF
 
 Detected values
