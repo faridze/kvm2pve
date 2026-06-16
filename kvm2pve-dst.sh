@@ -208,7 +208,7 @@ Handoff token
 $token
 
 Run on source:
-./kvm2pve-src.sh quick VM_NAME '$token'
+./kvm2pve-src.sh quick '$token'
 
 Then return here when source checks are ready:
 ./kvm2pve-dst.sh preflight
