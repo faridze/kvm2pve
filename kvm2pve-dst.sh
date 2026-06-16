@@ -42,16 +42,16 @@ load_config(){
   source "$CONFIG_FILE"
   : "${VM_NAME:?}"; : "${PVE_VMID:?}"; : "${PVE_DISK:?}"
   NBD_PORT="${NBD_PORT:-10809}"
-  NBD_EXPORT="${NBD_EXPORT:-$VM_NAME}"
+  NBD_EXPORT="${NBD_EXPORT:-vm-${PVE_VMID}}"
 }
 
 init_config(){
   local vm vmid disk nbd_port nbd_export
-  ask vm "Source VM name / NBD export base" "kvm3023"
+  ask vm "Source VM name / display name" "kvm3023"
   ask vmid "Destination Proxmox VMID" "2672"
   ask disk "Destination disk path" "/dev/pve/vm-${vmid}-disk-0"
   ask nbd_port "NBD port" "10809"
-  ask nbd_export "NBD export name" "$vm"
+  ask nbd_export "NBD export name" "vm-${vmid}"
   cat > "$CONFIG_FILE" <<EOF
 VM_NAME=$vm
 PVE_VMID=$vmid
@@ -127,7 +127,7 @@ discover_config(){
   vm_name="$(vm_name_from_qm "$vmid")"
   disk="$(first_disk_from_qm "$vmid")"
   nbd_port="$(get_conf NBD_PORT)"; [[ -n "$nbd_port" ]] || nbd_port="10809"
-  nbd_export="$(get_conf NBD_EXPORT)"; [[ -n "$nbd_export" ]] || nbd_export="$vm_name"
+  nbd_export="vm-${vmid}"
 
   cat <<EOF
 
