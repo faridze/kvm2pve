@@ -30,6 +30,7 @@ Proof-of-concept validation completed:
 ```text
 kvm2pve-src.sh                 Run on source Virtualizor/KVM host
 kvm2pve-dst.sh                 Run on destination Proxmox host
+kvm2pve-ui.sh                  Optional whiptail terminal UI
 examples/kvm2pve.env.example   Example shared config
 ```
 
@@ -119,6 +120,31 @@ Then follow the printed steps:
 `quick` keeps dangerous actions explicit. It prepares and verifies the config,
 prints the next commands, and leaves `export`, `full`, `final`, `stop-source`,
 `close`, and `boot` as deliberate operator commands.
+
+## Terminal UI
+
+Run:
+
+```bash
+./kvm2pve-ui.sh
+```
+
+Recommended usage:
+
+1. Run UI on destination.
+2. Choose Start New Migration > Destination host.
+3. Copy the handoff token.
+4. Export NBD when prompted.
+5. Run UI on source.
+6. Choose Start New Migration > Source host.
+7. Paste handoff token.
+8. Follow guided confirmations.
+9. Return to destination.
+10. Choose Continue Migration and close + boot.
+
+The UI uses `whiptail` and is optional. The CLI scripts still work directly,
+dangerous actions still require confirmation, and the UI does not implement
+`resume-full`.
 
 ## Manual handoff workflow
 

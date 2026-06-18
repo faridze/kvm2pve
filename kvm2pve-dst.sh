@@ -2,7 +2,7 @@
 # kvm2pve destination-side helper for Proxmox
 set -Eeuo pipefail
 
-VERSION="0.2.2"
+VERSION="0.4.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
