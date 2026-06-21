@@ -2,7 +2,7 @@
 # kvm2pve source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
@@ -42,6 +42,7 @@ Usage:
   ./kvm2pve-src.sh full
   ./kvm2pve-src.sh wait-full
   ./kvm2pve-src.sh mark-full
+  ./kvm2pve-src.sh set-backup-method
   ./kvm2pve-src.sh incremental
   ./kvm2pve-src.sh cutover-check
   ./kvm2pve-src.sh check-paused
@@ -79,6 +80,7 @@ load_config(){
   NBD_EXPORT="${NBD_EXPORT:-vm-${PVE_VMID}}"
   TUNNEL_MODE="${TUNNEL_MODE:-autossh}"
   AUTOSSH_MONITOR_PORT="${AUTOSSH_MONITOR_PORT:-20000}"
+  BACKUP_METHOD="${BACKUP_METHOD:-drive-backup}"
 }
 
 get_conf(){ local key="$1"; [[ -f "$CONFIG_FILE" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$CONFIG_FILE"; }
@@ -158,6 +160,7 @@ NBD_PORT=10809
 NBD_EXPORT=vm-${pve_vmid}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
+BACKUP_METHOD=drive-backup
 EOF
   chmod 600 "$CONFIG_FILE"
   ok "Config written: $CONFIG_FILE"
@@ -189,6 +192,7 @@ ensure_base_config(){
     [[ -n "$(get_conf NBD_PORT)" ]] || write_key NBD_PORT 10809
     [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
     [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
+    [[ -n "$(get_conf BACKUP_METHOD)" ]] || write_key BACKUP_METHOD drive-backup
   else
     vm="$vm_arg"
     [[ -n "$vm" ]] || ask vm "Source VM name" "kvm3023"
@@ -212,6 +216,7 @@ NBD_PORT=10809
 NBD_EXPORT=vm-${pve_vmid}
 TUNNEL_MODE=autossh
 AUTOSSH_MONITOR_PORT=20000
+BACKUP_METHOD=drive-backup
 EOF
     chmod 600 "$CONFIG_FILE"
   fi
@@ -231,6 +236,7 @@ Proxmox VMID   : $PVE_VMID
 Proxmox disk   : $PVE_DISK
 NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}
 Tunnel mode    : $TUNNEL_MODE
+Backup method  : ${BACKUP_METHOD:-drive-backup}
 EOF
 }
 
@@ -462,6 +468,7 @@ remote_prepare(){
   write_key NBD_EXPORT "vm-${pve_vmid}"
   [[ -n "$(get_conf TUNNEL_MODE)" ]] || write_key TUNNEL_MODE autossh
   [[ -n "$(get_conf AUTOSSH_MONITOR_PORT)" ]] || write_key AUTOSSH_MONITOR_PORT 20000
+  [[ -n "$(get_conf BACKUP_METHOD)" ]] || write_key BACKUP_METHOD drive-backup
 
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
@@ -540,22 +547,29 @@ block_jobs_query_ok_empty(){
 }
 wait_jobs_empty(){
   load_config
-  local out
+  local out job status
   while true; do
     out="$(block_jobs_json)"
-    if ! printf '%s\n' "$out" | grep -q '"type"'; then
-      ok "No active block job"
-      return 0
-    fi
     if printf '%s\n' "$out" | grep -q '"error"'; then
       printf '%s\n' "$out"
       die "Block job ended with an error"
     fi
+    if ! printf '%s\n' "$out" | grep -q '"type"'; then
+      ok "No active block job"
+      return 0
+    fi
+    status="$(printf '%s\n' "$out" | awk -F'"' '/"status"/ {print $4; exit}')"
+    job="$(printf '%s\n' "$out" | awk -F'"' '/"device"/ {print $4; exit}')"
     printf '%s\n' "$out" | awk '
       /"offset"/ {gsub(/[^0-9]/,"",$2); offset=$2}
       /"len"/ {gsub(/[^0-9]/,"",$2); len=$2}
       /"status"/ {gsub(/[",]/,"",$2); status=$2}
       END { if (len > 0) printf "Progress: %d%% | %s / %s | Status: %s\n", int((offset*100)/len), offset, len, status; else print "Block job running" }'
+    if [[ "$status" == "concluded" ]]; then
+      [[ -n "$job" ]] && job_dismiss "$job"
+      ok "Block job concluded"
+      return 0
+    fi
     sleep 2
   done
 }
@@ -807,25 +821,79 @@ create_bitmap(){
   verify_bitmap
 }
 
+
+select_backup_method(){
+  load_config
+  echo
+  echo "Select backup method:"
+  echo
+  echo "1) drive-backup      Recommended for CentOS 7 / old QEMU"
+  echo "2) blockdev-backup   Modern QEMU block graph method"
+  echo "3) auto              Currently chooses drive-backup"
+  echo
+  local c method
+  read -r -p "Choice [${BACKUP_METHOD:-drive-backup}]: " c
+  case "$c" in
+    ""|1|drive-backup) method="drive-backup" ;;
+    2|blockdev-backup) method="blockdev-backup" ;;
+    3|auto) method="auto" ;;
+    *) die "Invalid backup method choice: $c" ;;
+  esac
+  write_key BACKUP_METHOD "$method"
+  ok "BACKUP_METHOD=$method"
+}
+
+effective_backup_method(){
+  case "${BACKUP_METHOD:-drive-backup}" in
+    drive-backup) printf 'drive-backup' ;;
+    blockdev-backup) printf 'blockdev-backup' ;;
+    auto) printf 'drive-backup' ;;
+    *) printf 'drive-backup' ;;
+  esac
+}
+
+job_dismiss(){
+  local job="$1"
+  qmp '{"execute":"job-dismiss","arguments":{"id":"'"$job"'"}}' >/dev/null 2>&1 || true
+}
+
 backup_job(){
-  local sync="$1" job="$2" extra="" out
+  local sync="$1" job="$2" extra="" out method target_url
 
   load_config
   [[ -n "$QEMU_DEVICE" ]] || die "QEMU_DEVICE is empty. Run discover first."
 
   if [[ "$sync" == "incremental" ]]; then
     require_full_completed
+    extra=',"bitmap":"'"$BITMAP"'"'
   fi
 
   if ! block_jobs_empty; then
     die "A block job is already present. Run watch/status first."
   fi
 
-  if [[ "$sync" == "incremental" ]]; then
-    extra=',"bitmap":"'"$BITMAP"'"'
-  fi
+  method="$(effective_backup_method)"
+  ok "Using backup method: $method"
 
-  out="$(qmp '{
+  case "$method" in
+    drive-backup)
+      target_url="nbd://127.0.0.1:${NBD_PORT}/${NBD_EXPORT}"
+      out="$(qmp '{
+  "execute":"drive-backup",
+  "arguments":{
+    "device":"'"$QEMU_DEVICE"'",
+    "target":"'"$target_url"'",
+    "format":"raw",
+    "sync":"'"$sync"'"'"$extra"',
+    "job-id":"'"$job"'",
+    "mode":"existing",
+    "auto-finalize":true,
+    "auto-dismiss":false
+  }
+}')"
+      ;;
+    blockdev-backup)
+      out="$(qmp '{
   "execute":"blockdev-backup",
   "arguments":{
     "device":"'"$QEMU_DEVICE"'",
@@ -833,14 +901,19 @@ backup_job(){
     "sync":"'"$sync"'"'"$extra"',
     "job-id":"'"$job"'",
     "auto-finalize":true,
-    "auto-dismiss":true
+    "auto-dismiss":false
   }
 }')"
+      ;;
+    *)
+      die "Unsupported BACKUP_METHOD: $method"
+      ;;
+  esac
 
   printf '%s\n' "$out"
 
   if printf '%s\n' "$out" | grep -q '"error"'; then
-    die "blockdev-backup failed"
+    die "$method failed"
   fi
 }
 
@@ -870,26 +943,9 @@ wait_full(){
   if [[ "$(state_get FULL_STARTED)" != "1" || "$(state_get FULL_JOB_ID)" != "full" ]]; then
     die "Full job was not started by this state file. Refusing to mark completed automatically. If you are sure full completed successfully, run mark-full."
   fi
-  local out
-  while true; do
-    out="$(block_jobs_json 2>/dev/null)" || die "Could not query block jobs over QMP"
-    if printf '%s\n' "$out" | grep -q '"error"'; then
-      printf '%s\n' "$out"
-      die "Block job query returned an error"
-    fi
-    if ! printf '%s\n' "$out" | grep -q '"type"'; then
-      ok "No active block job"
-      mark_full_completed
-      ok "Full sync marked completed: $(state_file)"
-      return 0
-    fi
-    printf '%s\n' "$out" | awk '
-      /"offset"/ {gsub(/[^0-9]/,"",$2); offset=$2}
-      /"len"/ {gsub(/[^0-9]/,"",$2); len=$2}
-      /"status"/ {gsub(/[",]/,"",$2); status=$2}
-      END { if (len > 0) printf "Progress: %d%% | %s / %s | Status: %s\n", int((offset*100)/len), offset, len, status; else print "Block job running" }'
-    sleep 2
-  done
+  wait_jobs_empty
+  mark_full_completed
+  ok "Full sync marked completed: $(state_file)"
 }
 
 report(){
@@ -904,6 +960,8 @@ Proxmox VMID         : $PVE_VMID
 Destination disk     : $PVE_DISK
 Bitmap               : $BITMAP
 Target node          : $TARGET_NODE
+Backup method        : ${BACKUP_METHOD:-drive-backup}
+Effective method     : $(effective_backup_method)
 State file           : $(state_file)
 FULL_STARTED         : $(state_get FULL_STARTED)
 FULL_STARTED_AT      : $(state_get FULL_STARTED_AT)
@@ -1058,6 +1116,7 @@ case "$cmd" in
   full) full_sync ;;
   wait-full) wait_full ;;
   mark-full) mark_full ;;
+  set-backup-method) select_backup_method ;;
   incremental) backup_job incremental inc1 ;;
   cutover-check) cutover_check ;;
   check-paused) check_paused ;;
