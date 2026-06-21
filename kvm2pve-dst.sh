@@ -7,6 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${KVM2PVE_CONFIG:-${SCRIPT_DIR}/kvm2pve.env}"
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
+if [[ -n "${NO_COLOR:-}" ]]; then
+  RED=""; GREEN=""; YELLOW=""; BLUE=""; NC=""
+fi
 info(){ echo "${BLUE}>>${NC} $*"; }
 ok(){ echo "${GREEN}OK${NC} $*"; }
 warn(){ echo "${YELLOW}WARN${NC} $*"; }

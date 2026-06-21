@@ -8,6 +8,12 @@ DST_SCRIPT="${SCRIPT_DIR}/kvm2pve-dst.sh"
 VERSION="0.4.0"
 
 LAST_OUTPUT=""
+LAST_ACTION="none"
+LAST_STATUS="not started"
+PREVIOUS_ACTION="none"
+SUGGESTED_ACTION="preflight"
+
+WORKFLOW_ORDER="preflight remote-export tunnel tunnel-check attach-target bitmap full wait-full report cutover-check final stop-source remote-dst-close"
 
 missing_whiptail(){
   cat <<'EOF'
@@ -28,6 +34,8 @@ EOF
 }
 
 command -v whiptail >/dev/null 2>&1 || { missing_whiptail; exit 1; }
+
+strip_ansi(){ sed -r 's/\x1B\[[0-9;]*[mK]//g'; }
 
 require_scripts(){
   local missing=0
@@ -53,6 +61,12 @@ ask_yesno(){
   whiptail --title "$title" --yesno "$prompt" 10 78
 }
 
+ask_exact(){
+  local title="$1" prompt="$2" expected="$3" value
+  value="$(whiptail --title "$title" --inputbox "$prompt\n\nType exactly: $expected" 14 82 "" 3>&1 1>&2 2>&3)" || return 1
+  [[ "$value" == "$expected" ]]
+}
+
 show_textbox_file(){
   local title="$1" file="$2" lines chars
   lines="$(wc -l < "$file" | awk '{print $1}')"
@@ -70,101 +84,17 @@ show_textbox_file(){
   fi
 }
 
-show_output(){
-  local title="$1" file="$2"
-  show_textbox_file "$title" "$file"
-}
-
-show_error(){
-  local title="$1" status="$2"
-  whiptail --title "Command failed" --msgbox "${title}\n\nExit code: ${status}\n\nThe workflow stopped. Review the command output before continuing." 12 78 || true
+show_file_then_details(){
+  local title="$1" summary_file="$2" details_file="$3"
+  show_textbox_file "$title" "$summary_file"
+  if ask_yesno "Details" "Show full command output?"; then
+    show_textbox_file "$title details" "$details_file"
+  fi
 }
 
 capture_output(){
   local tmp="$1"
   LAST_OUTPUT="$(cat "$tmp")"
-}
-
-run_command(){
-  local title="$1"; shift
-  local tmp status
-  tmp="$(mktemp)"
-  status=0
-  (
-    cd "$SCRIPT_DIR"
-    bash "$@"
-  ) >"$tmp" 2>&1 || status=$?
-  capture_output "$tmp"
-  if (( status != 0 )); then
-    show_error "$title" "$status"
-    show_output "$title output" "$tmp"
-    rm -f "$tmp"
-    return "$status"
-  fi
-  show_output "$title output" "$tmp"
-  rm -f "$tmp"
-  return 0
-}
-
-run_command_with_input(){
-  local title="$1" input="$2"; shift 2
-  local tmp status
-  tmp="$(mktemp)"
-  status=0
-  (
-    cd "$SCRIPT_DIR"
-    printf '%b' "$input" | bash "$@"
-  ) >"$tmp" 2>&1 || status=$?
-  capture_output "$tmp"
-  if (( status != 0 )); then
-    show_error "$title" "$status"
-    show_output "$title output" "$tmp"
-    rm -f "$tmp"
-    return "$status"
-  fi
-  show_output "$title output" "$tmp"
-  rm -f "$tmp"
-  return 0
-}
-
-run_command_confirm(){
-  local title="$1" prompt="$2"; shift 2
-  ask_yesno "$title" "$prompt" || return 1
-  run_command "$title" "$@"
-}
-
-run_dangerous_confirmed(){
-  local title="$1" prompt="$2" input="$3"; shift 3
-  ask_yesno "$title" "$prompt" || return 1
-  if [[ -n "$input" ]]; then
-    run_command_with_input "$title" "$input" "$@"
-  else
-    run_command "$title" "$@"
-  fi
-}
-
-run_long_command(){
-  local title="$1"; shift
-  local status
-  clear || true
-  printf '%s\n' "$title"
-  printf '%*s\n' "${#title}" '' | tr ' ' '-'
-  printf 'Running:'
-  printf ' %q' "$@"
-  printf '\n\n'
-  (
-    cd "$SCRIPT_DIR"
-    bash "$@"
-  )
-  status=$?
-  printf '\nCommand exited with status %s.\n' "$status"
-  printf 'Press Enter to continue...'
-  read -r _
-  if (( status != 0 )); then
-    whiptail --title "Command failed" --msgbox "${title}\n\nExit code: ${status}\n\nThe workflow stopped." 10 78 || true
-    return "$status"
-  fi
-  return 0
 }
 
 current_conf_value(){
@@ -173,38 +103,447 @@ current_conf_value(){
   awk -F= -v k="$key" -v d="$default" '$1==k {print substr($0, index($0,"=")+1); found=1; exit} END{if(!found) print d}' "$file"
 }
 
+next_for(){
+  case "$1" in
+    preflight) printf 'remote-export' ;;
+    remote-export) printf 'tunnel' ;;
+    tunnel) printf 'tunnel-check' ;;
+    tunnel-check) printf 'attach-target' ;;
+    attach-target) printf 'bitmap' ;;
+    bitmap) printf 'full' ;;
+    full) printf 'wait-full' ;;
+    wait-full) printf 'report' ;;
+    report) printf 'cutover-check' ;;
+    cutover-check) printf 'final' ;;
+    final) printf 'stop-source' ;;
+    stop-source) printf 'remote-dst-close' ;;
+    remote-dst-close) printf 'exit' ;;
+    *) printf 'preflight' ;;
+  esac
+}
+
+set_step_status(){
+  local action="$1" status="$2"
+  PREVIOUS_ACTION="$LAST_ACTION"
+  LAST_ACTION="$action"
+  LAST_STATUS="$status"
+  if [[ "$status" == "success" ]]; then
+    SUGGESTED_ACTION="$(next_for "$action")"
+  else
+    SUGGESTED_ACTION="$action"
+  fi
+}
+
+workflow_header(){
+  local current next
+  current="$SUGGESTED_ACTION"
+  next="$(next_for "$current")"
+  cat <<EOF
+Previous : $PREVIOUS_ACTION
+Last     : $LAST_ACTION ($LAST_STATUS)
+Current  : $current
+Next     : $next
+EOF
+}
+
+run_cli_capture(){
+  local tmp raw status
+  raw="$(mktemp)"
+  tmp="$(mktemp)"
+  status=0
+  (
+    cd "$SCRIPT_DIR"
+    NO_COLOR=1 bash "$@"
+  ) >"$raw" 2>&1 || status=$?
+  strip_ansi < "$raw" > "$tmp"
+  rm -f "$raw"
+  capture_output "$tmp"
+  printf '%s' "$tmp"
+  return "$status"
+}
+
+run_cli_capture_with_input(){
+  local input="$1" tmp raw status
+  shift
+  raw="$(mktemp)"
+  tmp="$(mktemp)"
+  status=0
+  (
+    cd "$SCRIPT_DIR"
+    printf '%b' "$input" | NO_COLOR=1 bash "$@"
+  ) >"$raw" 2>&1 || status=$?
+  strip_ansi < "$raw" > "$tmp"
+  rm -f "$raw"
+  capture_output "$tmp"
+  printf '%s' "$tmp"
+  return "$status"
+}
+
+run_cli_interactive(){
+  local title="$1"; shift
+  local tmp status
+  tmp="$(mktemp)"
+  clear || true
+  printf '%s\n' "$title"
+  printf '%*s\n' "${#title}" '' | tr ' ' '-'
+  printf 'Running:'
+  printf ' %q' "$@"
+  printf '\n\n'
+  status=0
+  (
+    cd "$SCRIPT_DIR"
+    NO_COLOR=1 bash "$@"
+  ) 2>&1 | strip_ansi | tee "$tmp" || status=${PIPESTATUS[0]}
+  capture_output "$tmp"
+  printf '\nCommand exited with status %s.\n' "$status"
+  printf 'Press Enter to continue...'
+  read -r _
+  rm -f "$tmp"
+  return "$status"
+}
+
+append_if_match(){
+  local out="$1" pattern="$2" line="$3"
+  if printf '%s\n' "$out" | grep -Eiq "$pattern"; then
+    printf '%s\n' "$line"
+  fi
+}
+
+summarize_output(){
+  local action="$1" status="$2" out="$3" vm vmid nbd_port nbd_export disk bitmap
+  vm="$(current_conf_value VM_NAME unknown)"
+  vmid="$(current_conf_value PVE_VMID unknown)"
+  nbd_port="$(current_conf_value NBD_PORT 10809)"
+  nbd_export="$(current_conf_value NBD_EXPORT "vm-${vmid}")"
+  disk="$(current_conf_value PVE_DISK unknown)"
+  bitmap="$(current_conf_value BITMAP unknown)"
+
+  if (( status == 0 )); then
+    printf '[OK] %s completed\n\n' "$action"
+  else
+    printf '[FAIL] %s failed with exit code %s\n\n' "$action" "$status"
+  fi
+
+  case "$action" in
+    preflight)
+      append_if_match "$out" 'Preflight checks passed' '[OK] Source checks passed'
+      printf '[OK] Config loaded for VM: %s\n' "$vm"
+      printf '[OK] Destination SSH target: %s@%s:%s\n' "$(current_conf_value PVE_SSH_USER root)" "$(current_conf_value PVE_HOST unknown)" "$(current_conf_value PVE_SSH_PORT 22)"
+      ;;
+    remote-export)
+      append_if_match "$out" 'Destination preflight checks passed' '[OK] Destination preflight passed'
+      append_if_match "$out" 'NBD export is ready|qemu-nbd.*ready' '[OK] qemu-nbd export started'
+      printf 'Export name : %s\n' "$nbd_export"
+      printf 'Port        : %s\n' "$nbd_port"
+      printf 'Disk        : %s\n' "$disk"
+      ;;
+    tunnel)
+      append_if_match "$out" 'Tunnel command sent|Direct mode selected' '[OK] Tunnel command accepted'
+      printf 'Expected local NBD listener: 127.0.0.1:%s\n' "$nbd_port"
+      ;;
+    tunnel-check)
+      append_if_match "$out" 'Tunnel and NBD export are reachable|image:' '[OK] Export reachable through tunnel'
+      printf 'Export name : %s\n' "$nbd_export"
+      ;;
+    attach-target)
+      append_if_match "$out" 'Target node verified|Target node already exists' '[OK] Target attached and verified'
+      printf 'Target node : %s\n' "$(current_conf_value TARGET_NODE unknown)"
+      ;;
+    bitmap)
+      append_if_match "$out" 'Bitmap verified|Bitmap already exists' '[OK] Bitmap created/verified'
+      printf 'Bitmap      : %s\n' "$bitmap"
+      ;;
+    full)
+      append_if_match "$out" 'Full sync job submitted|blockdev-backup' '[OK] Full sync submitted'
+      printf '%s\n' "$out" | awk '
+        /"offset"/ {gsub(/[^0-9]/,"",$2); offset=$2}
+        /"len"/ {gsub(/[^0-9]/,"",$2); len=$2}
+        /"status"/ {gsub(/[",]/,"",$2); state=$2}
+        END {
+          if (len > 0) {
+            printf "Current job status : %s\n", (state != "" ? state : "running")
+            printf "Bytes transferred  : %s / %s\n", offset, len
+            printf "Percent complete   : %d%%\n", int((offset*100)/len)
+          } else {
+            print "Current job status : see details or run wait-full/status"
+          }
+        }'
+      printf 'Last report time    : %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+      ;;
+    wait-full)
+      append_if_match "$out" 'Full sync marked completed|No active block job' '[OK] Full sync completed marker updated'
+      ;;
+    report|status-report)
+      build_dashboard_text "$out"
+      ;;
+    cutover-check)
+      append_if_match "$out" '^OK' '[OK] Cutover checks reported OK items'
+      ;;
+    final)
+      append_if_match "$out" 'Final incremental completed' '[OK] Final sync completed'
+      ;;
+    stop-source)
+      append_if_match "$out" 'Source VM stopped' '[OK] Source VM stopped'
+      ;;
+    remote-dst-close)
+      append_if_match "$out" 'NBD export closed|closed' '[OK] Remote destination export closed'
+      ;;
+    next)
+      printf '%s\n' "$out"
+      ;;
+    *)
+      printf 'Review details for command output.\n'
+      ;;
+  esac
+}
+
+build_dashboard_text(){
+  local out="$1" vm vmid full final stopped tunnel bitmap export last
+  vm="$(current_conf_value VM_NAME unknown)"
+  vmid="$(current_conf_value PVE_VMID unknown)"
+  full="$(printf '%s\n' "$out" | awk -F: '/FULL_COMPLETED[[:space:]]*:/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
+  final="$(printf '%s\n' "$out" | awk -F: '/FINAL_COMPLETED[[:space:]]*:/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
+  stopped="$(printf '%s\n' "$out" | awk -F: '/SOURCE_STOPPED[[:space:]]*:/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
+  printf '%s\n' "$out" | grep -Eq '127\.0\.0\.1:|LISTEN' && tunnel="seen" || tunnel="unknown"
+  printf '%s\n' "$out" | grep -Eiq 'bitmap|Bitmap' && bitmap="seen" || bitmap="unknown"
+  printf '%s\n' "$out" | grep -Eiq 'qemu-nbd|NBD|10809' && export="seen" || export="unknown"
+  last="$LAST_ACTION ($LAST_STATUS)"
+
+  printf 'Source VM            : %s\n' "$vm"
+  printf 'Destination VMID     : %s\n' "$vmid"
+  printf 'Full sync completed  : %s\n' "${full:-unknown}"
+  printf 'Final completed      : %s\n' "${final:-unknown}"
+  printf 'Source stopped       : %s\n' "${stopped:-unknown}"
+  printf 'Tunnel               : %s\n' "$tunnel"
+  printf 'Bitmap               : %s\n' "$bitmap"
+  printf 'Export               : %s\n' "$export"
+  printf 'Last action          : %s\n' "$last"
+}
+
+show_command_result(){
+  local title="$1" action="$2" status="$3" details_file="$4" summary_file out
+  summary_file="$(mktemp)"
+  out="$(cat "$details_file")"
+  summarize_output "$action" "$status" "$out" > "$summary_file"
+  show_file_then_details "$title" "$summary_file" "$details_file"
+  rm -f "$summary_file" "$details_file"
+}
+
+run_step(){
+  local action="$1" title="$2"; shift 2
+  local out status status_out
+  status=0
+  out="$(run_cli_capture "$@")" || status=$?
+  if [[ "$action" == "full" && "$status" == "0" ]]; then
+    status_out="$(run_cli_capture "$SRC_SCRIPT" status)" || true
+    {
+      cat "$out"
+      printf '\n== Current job status ==\n'
+      cat "$status_out"
+    } >> "$out.combined"
+    rm -f "$out" "$status_out"
+    out="$out.combined"
+    capture_output "$out"
+  fi
+  show_command_result "$title" "$action" "$status" "$out"
+  if (( status == 0 )); then set_step_status "$action" success; else set_step_status "$action" failed; fi
+  return "$status"
+}
+
+run_step_with_input(){
+  local action="$1" title="$2" input="$3"
+  shift 3
+  local out status
+  status=0
+  out="$(run_cli_capture_with_input "$input" "$@")" || status=$?
+  show_command_result "$title" "$action" "$status" "$out"
+  if (( status == 0 )); then set_step_status "$action" success; else set_step_status "$action" failed; fi
+  return "$status"
+}
+
+run_combined_step(){
+  local action="$1" title="$2" first_title="$3"; shift 3
+  local tmp one status cmd_count cmd
+  tmp="$(mktemp)"
+  status=0
+  cmd_count=0
+  for cmd in "$@"; do
+    cmd_count=$((cmd_count + 1))
+    printf '== %s %s ==\n' "$first_title" "$cmd_count" >> "$tmp"
+    one="$(run_cli_capture "$SRC_SCRIPT" "$cmd")" || status=$?
+    cat "$one" >> "$tmp"
+    rm -f "$one"
+    printf '\n' >> "$tmp"
+    (( status == 0 )) || break
+  done
+  capture_output "$tmp"
+  show_command_result "$title" "$action" "$status" "$tmp"
+  if (( status == 0 )); then set_step_status "$action" success; else set_step_status "$action" failed; fi
+  return "$status"
+}
+
+run_status_report(){
+  local tmp one status
+  tmp="$(mktemp)"
+  status=0
+  printf '== Source report ==\n' >> "$tmp"
+  one="$(run_cli_capture "$SRC_SCRIPT" report)" || status=$?
+  cat "$one" >> "$tmp"; rm -f "$one"
+  printf '\n== Source status ==\n' >> "$tmp"
+  one="$(run_cli_capture "$SRC_SCRIPT" status)" || status=$?
+  cat "$one" >> "$tmp"; rm -f "$one"
+  printf '\n== Remote destination status ==\n' >> "$tmp"
+  one="$(run_cli_capture "$SRC_SCRIPT" remote-dst-status)" || status=$?
+  cat "$one" >> "$tmp"; rm -f "$one"
+  capture_output "$tmp"
+  show_command_result "Status / Report" status-report "$status" "$tmp"
+  return "$status"
+}
+
+run_next_suggested(){
+  run_step next "Next Suggested Step" "$SRC_SCRIPT" next || true
+}
+
+confirm_final(){
+  ask_exact "WARNING" "This will suspend the source VM and perform the final incremental sync." "YES"
+}
+
+confirm_stop_source(){
+  ask_exact "WARNING" "This will stop the source VM.\n\nIt does NOT:\n* delete disks\n* undefine VM\n* remove storage" "STOP"
+}
+
+run_final_sync(){
+  confirm_final || return 1
+  run_step_with_input final "Final sync" "yes
+" "$SRC_SCRIPT" final
+}
+
+run_stop_source(){
+  confirm_stop_source || return 1
+  run_step_with_input stop-source "Stop source" "yes
+" "$SRC_SCRIPT" stop-source
+}
+
+ask_remote_prepare_form(){
+  local values file default_vm default_host default_vmid default_user default_port
+  default_vm="$(current_conf_value VM_NAME kvm3023)"
+  default_host="$(current_conf_value PVE_HOST CHANGE_ME)"
+  default_vmid="$(current_conf_value PVE_VMID '')"
+  default_user="$(current_conf_value PVE_SSH_USER root)"
+  default_port="$(current_conf_value PVE_SSH_PORT 22)"
+  values="$(whiptail --title "New Migration" --form "Enter source and destination values. Run this UI on the SOURCE host." 18 86 8 \
+    "Source VM:" 1 1 "$default_vm" 1 26 42 128 \
+    "Destination Host:" 2 1 "$default_host" 2 26 42 128 \
+    "Destination VMID:" 3 1 "$default_vmid" 3 26 42 32 \
+    "SSH User:" 4 1 "$default_user" 4 26 42 64 \
+    "SSH Port:" 5 1 "$default_port" 5 26 42 16 \
+    3>&1 1>&2 2>&3)" || return 1
+  file="$(mktemp)"
+  printf '%s\n' "$values" > "$file"
+  printf '%s' "$file"
+}
+
+confirm_remote_prepare_summary(){
+  local vm="$1" host="$2" vmid="$3" user="$4" port="$5"
+  whiptail --title "Confirm Remote Migration" --yesno "Source VM: $vm\nDestination Host: $host\nDestination VMID: $vmid\nSSH User: $user\nSSH Port: $port\n\nRun remote-prepare from this SOURCE host now?" 15 82
+}
+
 main_menu(){
   local choice
   while true; do
     choice="$(whiptail --title "kvm2pve Terminal UI v${VERSION}" --menu "Choose an action." 20 78 10 \
       "start" "New Migration - source remote wizard" \
       "continue" "Continue Migration" \
-      "status" "Status / Report" \
-      "next" "Next Suggested Commands" \
-      "advanced" "Advanced Tools" \
+      "status-report" "Status / Report" \
+      "next" "Next Suggested Step" \
+      "advanced" "Advanced / Legacy" \
       "exit" "Exit" \
       3>&1 1>&2 2>&3)" || exit 0
     case "$choice" in
       start) start_new_migration || true ;;
-      continue) continue_migration || true ;;
-      status) migration_status || true ;;
-      next) run_command "Next suggested commands" "$SRC_SCRIPT" next || true ;;
+      continue) remote_workflow_menu || true ;;
+      status-report) run_status_report || true ;;
+      next) run_next_suggested || true ;;
       advanced) advanced_tools || true ;;
       exit) exit 0 ;;
     esac
   done
 }
 
-
 start_new_migration(){
-  start_source_remote_flow
+  local file vm host vmid user port
+  file="$(ask_remote_prepare_form)" || return 0
+  vm="$(sed -n '1p' "$file")"
+  host="$(sed -n '2p' "$file")"
+  vmid="$(sed -n '3p' "$file")"
+  user="$(sed -n '4p' "$file")"
+  port="$(sed -n '5p' "$file")"
+  rm -f "$file"
+  [[ -n "$vm" && -n "$host" && -n "$vmid" ]] || return 0
+  [[ -n "$user" ]] || user="root"
+  [[ -n "$port" ]] || port="22"
+  confirm_remote_prepare_summary "$vm" "$host" "$vmid" "$user" "$port" || return 0
+  if run_cli_interactive "Remote prepare" "$SRC_SCRIPT" remote-prepare "$vm" "$host" "$vmid" "$port" "$user"; then
+    set_step_status remote-prepare success
+    SUGGESTED_ACTION="preflight"
+    remote_workflow_menu
+  else
+    set_step_status remote-prepare failed
+  fi
+}
+
+remote_workflow_menu(){
+  local choice header
+  while true; do
+    header="$(workflow_header)"
+    choice="$(whiptail --title "Source Remote Workflow" --default-item "$SUGGESTED_ACTION" --menu "$header" 26 90 18 \
+      "prep" "=== Safe Preparation ===" \
+      "preflight" "Run preflight" \
+      "remote-export" "Run remote export" \
+      "tunnel" "Start tunnel" \
+      "tunnel-check" "Check tunnel" \
+      "attach-target" "Attach target and check" \
+      "bitmap" "Create and check bitmap" \
+      "sync" "=== Full Sync ===" \
+      "full" "Start full sync" \
+      "wait-full" "Wait full sync" \
+      "report" "Show report" \
+      "status-report" "Status dashboard" \
+      "next" "Next Suggested Step" \
+      "danger" "=== Cutover / Danger Zone ===" \
+      "cutover-check" "Cutover check" \
+      "final" "Final sync" \
+      "stop-source" "Stop source" \
+      "remote-dst-close" "Close remote destination export" \
+      "exit" "Exit" \
+      3>&1 1>&2 2>&3)" || return 0
+    case "$choice" in
+      prep|sync|danger) ;;
+      preflight) run_step preflight "Run preflight" "$SRC_SCRIPT" preflight || true ;;
+      remote-export) run_step remote-export "Run remote export" "$SRC_SCRIPT" remote-export || true ;;
+      tunnel) run_step tunnel "Start tunnel" "$SRC_SCRIPT" tunnel || true ;;
+      tunnel-check) run_step tunnel-check "Check tunnel" "$SRC_SCRIPT" tunnel-check || true ;;
+      attach-target) run_combined_step attach-target "Attach target" "target" attach-target check-target || true ;;
+      bitmap) run_combined_step bitmap "Create bitmap" "bitmap" bitmap check-bitmap || true ;;
+      full) run_step full "Start full sync" "$SRC_SCRIPT" full || true ;;
+      wait-full) run_step wait-full "Wait full sync" "$SRC_SCRIPT" wait-full || true ;;
+      report) run_step report "Show report" "$SRC_SCRIPT" report || true ;;
+      status-report) run_status_report || true ;;
+      next) run_next_suggested || true ;;
+      cutover-check) run_step cutover-check "Cutover check" "$SRC_SCRIPT" cutover-check || true ;;
+      final) run_final_sync || true ;;
+      stop-source) run_stop_source || true ;;
+      remote-dst-close) run_step remote-dst-close "Close remote destination export" "$SRC_SCRIPT" remote-dst-close || true ;;
+      exit) return 0 ;;
+    esac
+  done
 }
 
 manual_handoff_workflow(){
   local choice
   choice="$(whiptail --title "Manual Handoff Workflow" --menu "Legacy/manual path for hosts where source cannot SSH to destination." 16 82 5 \
-    "destination" "Destination host - generate handoff token" \
-    "source" "Source host - paste handoff token" \
+    "destination" "Destination Host - generate handoff token" \
+    "source" "Source Host - paste handoff token" \
     "back" "Back" \
     3>&1 1>&2 2>&3)" || return 0
   case "$choice" in
@@ -213,265 +552,71 @@ manual_handoff_workflow(){
   esac
 }
 
-
 start_destination_flow(){
   local vmid token tmp
-  vmid="$(ask_input "Destination host" "Destination VMID:" "$(current_conf_value PVE_VMID "")")" || return 0
+  vmid="$(ask_input "Destination Host" "Destination VMID:" "$(current_conf_value PVE_VMID '')")" || return 0
   [[ -n "$vmid" ]] || return 0
-
   run_command_with_input "Destination quick" "yes\n" "$DST_SCRIPT" quick "$vmid" || return 1
-
   token="$(printf '%s\n' "$LAST_OUTPUT" | grep -m1 '^KVM2PVE_HANDOFF_V1:' || true)"
   if [[ -n "$token" ]]; then
     tmp="$(mktemp)"
     {
-      printf 'Handoff token\n'
-      printf '-------------\n'
-      printf '%s\n\n' "$token"
-      printf 'Copy this token to the source host.\n\n'
-      printf 'Full command output\n'
-      printf '-------------------\n'
-      printf '%s\n' "$LAST_OUTPUT"
+      printf 'Handoff token\n-------------\n%s\n\n' "$token"
+      printf 'Copy this token to the source host.\n\nFull command output\n-------------------\n%s\n' "$LAST_OUTPUT"
     } > "$tmp"
     show_textbox_file "Handoff token" "$tmp"
     rm -f "$tmp"
   fi
-
-  if run_command_confirm "Export NBD" "Export NBD now?\n\nThis exposes the destination disk for writing." "$DST_SCRIPT" export; then
-    whiptail --title "Next step" --msgbox "Destination is ready.\n\nGo to the source host, run kvm2pve-ui.sh, choose Start New Migration > Source host, and paste the handoff token." 12 78 || true
-  fi
+  run_command_confirm "Export NBD" "Export NBD now?\n\nThis exposes the destination disk for writing." "$DST_SCRIPT" export || true
 }
 
-confirm_remote_prepare_summary(){
-  local vm="$1" pve_host="$2" pve_vmid="$3" ssh_port="$4" ssh_user="$5"
-  whiptail --title "Confirm Remote Migration" --yesno "Source VM: $vm\nDestination host: $pve_host\nDestination VMID: $pve_vmid\nSSH user: $ssh_user\nSSH port: $ssh_port\n\nRun remote-prepare from this SOURCE host now?" 15 82
-}
-
-start_source_remote_flow(){
-  local vm pve_host pve_vmid ssh_port ssh_user default_vm
-
-  default_vm="$(current_conf_value VM_NAME "kvm3023")"
-  vm="$(ask_input "Remote prepare" "Source VM name:" "$default_vm")" || return 0
-  [[ -n "$vm" ]] || return 0
-  pve_host="$(ask_input "Remote prepare" "Destination Proxmox host/IP:" "$(current_conf_value PVE_HOST "CHANGE_ME")")" || return 0
-  [[ -n "$pve_host" && "$pve_host" != "CHANGE_ME" ]] || return 0
-  pve_vmid="$(ask_input "Remote prepare" "Destination Proxmox VMID:" "$(current_conf_value PVE_VMID "")")" || return 0
-  [[ -n "$pve_vmid" ]] || return 0
-  ssh_port="$(ask_input "Remote prepare" "Destination SSH port:" "$(current_conf_value PVE_SSH_PORT "22")")" || return 0
-  [[ -n "$ssh_port" ]] || ssh_port="22"
-  ssh_user="$(ask_input "Remote prepare" "Destination SSH user:" "$(current_conf_value PVE_SSH_USER "root")")" || return 0
-  [[ -n "$ssh_user" ]] || ssh_user="root"
-
-  confirm_remote_prepare_summary "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || return 0
-  run_long_command "Remote prepare" "$SRC_SCRIPT" remote-prepare "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || return 1
+start_source_flow(){
+  local token vm host port input
+  token="$(ask_input "Source Host" "Paste handoff token:" '')" || return 0
+  [[ -n "$token" ]] || return 0
+  vm="$(ask_input "Source Host" "Source VM:" "$(current_conf_value VM_NAME kvm3023)")" || return 0
+  host="$(ask_input "Source Host" "Destination Host:" "$(current_conf_value PVE_HOST CHANGE_ME)")" || return 0
+  port="$(ask_input "Source Host" "SSH Port:" "$(current_conf_value PVE_SSH_PORT 22)")" || return 0
+  [[ -n "$port" ]] || port="22"
+  input="${vm}\n${host}\n${port}\nyes\nno\n"
+  run_command_with_input "Source quick" "$input" "$SRC_SCRIPT" quick "$token" || return 1
   remote_workflow_menu
 }
 
-remote_workflow_menu(){
-  local choice
-  while true; do
-    choice="$(whiptail --title "Source Remote Workflow" --menu "Choose the next explicit action. Final/stop are never run automatically." 25 88 16 \
-      "preflight" "Run preflight" \
-      "remote-export" "Run remote export" \
-      "tunnel" "Start tunnel" \
-      "tunnel-check" "Check tunnel" \
-      "attach-target" "Attach target and check" \
-      "bitmap" "Create and check bitmap" \
-      "full" "Start full sync" \
-      "wait-full" "Wait full sync" \
-      "report" "Show report" \
-      "status-report" "Status / Report" \
-      "next" "Next suggested commands" \
-      "cutover-check" "Cutover check" \
-      "final" "Final sync" \
-      "stop-source" "Stop source" \
-      "remote-dst-close" "Close remote destination export" \
-      "exit" "Exit" \
-      3>&1 1>&2 2>&3)" || return 0
-    case "$choice" in
-      preflight) run_command "Source preflight" "$SRC_SCRIPT" preflight || true ;;
-      remote-export) run_dangerous_confirmed "Remote export" "Start destination NBD export over SSH now?\n\nThis runs destination preflight first, then starts qemu-nbd." "" "$SRC_SCRIPT" remote-export || true ;;
-      tunnel) run_command "Start tunnel" "$SRC_SCRIPT" tunnel || true ;;
-      tunnel-check) run_command "Tunnel check" "$SRC_SCRIPT" tunnel-check || true ;;
-      attach-target) run_command "Attach target" "$SRC_SCRIPT" attach-target && run_command "Check target" "$SRC_SCRIPT" check-target || true ;;
-      bitmap) run_command "Create bitmap" "$SRC_SCRIPT" bitmap && run_command "Check bitmap" "$SRC_SCRIPT" check-bitmap || true ;;
-      full) run_dangerous_confirmed "Full sync" "Start full sync now?\n\nThis writes to the destination disk." "" "$SRC_SCRIPT" full || true ;;
-      wait-full) run_long_command "Waiting for full sync" "$SRC_SCRIPT" wait-full || true ;;
-      report) run_command "Source report" "$SRC_SCRIPT" report || true ;;
-      status-report) migration_status || true ;;
-      next) run_command "Next suggested commands" "$SRC_SCRIPT" next || true ;;
-      cutover-check) run_command "Cutover check" "$SRC_SCRIPT" cutover-check || true ;;
-      final) run_dangerous_confirmed "Final sync" "Run final sync now?\n\nThis will suspend the source VM. Do not run until ready for cutover." "yes\n" "$SRC_SCRIPT" final || true ;;
-      stop-source) run_dangerous_confirmed "Stop source" "Stop source VM now?\n\nUse only after final sync completed." "yes\n" "$SRC_SCRIPT" stop-source || true ;;
-      remote-dst-close) run_dangerous_confirmed "Remote destination close" "Close destination NBD export over SSH now?" "" "$SRC_SCRIPT" remote-dst-close || true ;;
-      exit) return 0 ;;
-    esac
-  done
-}
-
-
-start_source_flow(){
-  local token vm default_vm pve_host ssh_port input
-  token="$(ask_input "Source host" "Paste handoff token:" "")" || return 0
-  [[ -n "$token" ]] || return 0
-
-  default_vm="$(current_conf_value VM_NAME "kvm3023")"
-  vm="$(ask_input "Source host" "Source VM name:" "$default_vm")" || return 0
-  pve_host="$(ask_input "Source host" "Destination Proxmox host/IP reachable from source:" "$(current_conf_value PVE_HOST "CHANGE_ME")")" || return 0
-  ssh_port="$(ask_input "Source host" "Destination Proxmox SSH port:" "$(current_conf_value PVE_SSH_PORT "22")")" || return 0
-  [[ -n "$ssh_port" ]] || ssh_port="22"
-
-  input="${vm}\n${pve_host}\n${ssh_port}\nyes\nno\n"
-  run_command_with_input "Source quick" "$input" "$SRC_SCRIPT" quick "$token" || return 1
-
-  if ask_yesno "Safe preparation" "Run safe preparation steps now?"; then
-    run_source_prepare_steps || return 1
-  fi
-
-  if run_dangerous_confirmed "Full sync" "Start full sync now?\n\nThe source VM may keep running, but this writes to the destination disk." "" "$SRC_SCRIPT" full; then
-    if ask_yesno "Wait for full sync" "Watch and wait for full sync to complete now?"; then
-      run_long_command "Waiting for full sync" "$SRC_SCRIPT" wait-full || return 1
-      run_command "Source report" "$SRC_SCRIPT" report || return 1
-    fi
-  else
-    return 0
-  fi
-
-  if run_command_confirm "Cutover check" "Run cutover-check now?" "$SRC_SCRIPT" cutover-check; then
-    if run_dangerous_confirmed "Final incremental" "Run final incremental now?\n\nThis will suspend the source VM." "yes\n" "$SRC_SCRIPT" final; then
-      run_command "Source report" "$SRC_SCRIPT" report || return 1
-      if run_dangerous_confirmed "Stop source VM" "Stop source VM now?\n\nUse only after final incremental completed." "yes\n" "$SRC_SCRIPT" stop-source; then
-        whiptail --title "Source complete" --msgbox "Source side is complete.\n\nGo to destination host, choose Continue Migration, then close NBD and boot destination VM." 12 78 || true
-      fi
-    fi
-  fi
-}
-
-run_source_prepare_steps(){
-  local cmd
-  for cmd in tunnel tunnel-check attach-target check-target bitmap check-bitmap; do
-    if ! run_command "Source: ${cmd}" "$SRC_SCRIPT" "$cmd"; then
-      if ask_yesno "Preparation failed" "Open Advanced Tools now?"; then
-        advanced_tools
-      fi
-      return 1
-    fi
-  done
-}
-
-continue_migration(){
-  local choice
-  choice="$(whiptail --title "Continue Migration" --menu "Choose the host you are operating on." 14 78 4 \
-    "source" "Source host" \
-    "destination" "Destination host" \
-    "back" "Back" \
-    3>&1 1>&2 2>&3)" || return 0
-  case "$choice" in
-    source) continue_source || true ;;
-    destination) continue_destination || true ;;
-  esac
-}
-
-continue_source(){
-  local full final stopped choice
-  run_command "Source report" "$SRC_SCRIPT" report || return 1
-  full="$(printf '%s\n' "$LAST_OUTPUT" | awk -F: '/FULL_COMPLETED[[:space:]]*:/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
-  final="$(printf '%s\n' "$LAST_OUTPUT" | awk -F: '/FINAL_COMPLETED[[:space:]]*:/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
-  stopped="$(printf '%s\n' "$LAST_OUTPUT" | awk -F: '/SOURCE_STOPPED[[:space:]]*:/{gsub(/[[:space:]]/,"",$2); print $2; exit}')"
-
-  if [[ "$full" != "1" ]]; then
-    choice="$(whiptail --title "Source next step" --menu "Full sync is not completed. Recommended next step: run full sync, then wait-full." 16 78 5 \
-      "full" "Start full sync" \
-      "wait-full" "Watch wait-full" \
-      "report" "Show report" \
-      "back" "Back" \
-      3>&1 1>&2 2>&3)" || return 0
-    case "$choice" in
-      full) run_dangerous_confirmed "Full sync" "Start full sync now?\n\nThis writes to the destination disk." "" "$SRC_SCRIPT" full || true ;;
-      wait-full) run_long_command "Waiting for full sync" "$SRC_SCRIPT" wait-full || true ;;
-      report) run_command "Source report" "$SRC_SCRIPT" report || true ;;
-    esac
-  elif [[ "$final" != "1" ]]; then
-    choice="$(whiptail --title "Source next step" --menu "Full sync is completed. Recommended next step: cutover-check, then final incremental." 16 78 5 \
-      "cutover-final" "Run cutover-check then final" \
-      "cutover" "Run cutover-check only" \
-      "report" "Show report" \
-      "back" "Back" \
-      3>&1 1>&2 2>&3)" || return 0
-    case "$choice" in
-      cutover-final)
-        run_command "Cutover check" "$SRC_SCRIPT" cutover-check || return 1
-        run_dangerous_confirmed "Final incremental" "Run final incremental now?\n\nThis will suspend the source VM." "yes\n" "$SRC_SCRIPT" final || true
-        ;;
-      cutover) run_command "Cutover check" "$SRC_SCRIPT" cutover-check || true ;;
-      report) run_command "Source report" "$SRC_SCRIPT" report || true ;;
-    esac
-  elif [[ "$stopped" != "1" ]]; then
-    choice="$(whiptail --title "Source next step" --menu "Final incremental is completed. Recommended next step: stop the source VM." 15 78 4 \
-      "stop" "Stop source VM" \
-      "report" "Show report" \
-      "back" "Back" \
-      3>&1 1>&2 2>&3)" || return 0
-    case "$choice" in
-      stop) run_dangerous_confirmed "Stop source VM" "Stop source VM now?\n\nUse only after final incremental completed." "yes\n" "$SRC_SCRIPT" stop-source || true ;;
-      report) run_command "Source report" "$SRC_SCRIPT" report || true ;;
-    esac
-  else
-    whiptail --title "Source complete" --msgbox "Source side is complete.\n\nReturn to the destination host to close NBD and boot the destination VM." 10 78 || true
-  fi
-}
-
-continue_destination(){
-  local choice
-  while true; do
-    choice="$(whiptail --title "Destination Continue" --menu "Choose a destination action." 16 78 5 \
-      "close" "Close NBD" \
-      "boot" "Boot destination VM" \
-      "status" "Status" \
-      "back" "Back" \
-      3>&1 1>&2 2>&3)" || return 0
-    case "$choice" in
-      close) run_dangerous_confirmed "Close NBD" "Close destination NBD export now?" "" "$DST_SCRIPT" close || true ;;
-      boot) run_dangerous_confirmed "Boot destination VM" "Boot destination VM now?" "" "$DST_SCRIPT" boot || true ;;
-      status) run_command "Destination status" "$DST_SCRIPT" status || true ;;
-      back) return 0 ;;
-    esac
-  done
-}
-
-migration_status(){
-  local tmp status
+run_command_with_input(){
+  local title="$1" input="$2"; shift 2
+  local tmp raw status summary
+  raw="$(mktemp)"
   tmp="$(mktemp)"
   status=0
-  {
-    cd "$SCRIPT_DIR" || status=1
-    printf '== Source report ==
-'
-    bash "$SRC_SCRIPT" report || status=1
-    printf '
-== Source status ==
-'
-    bash "$SRC_SCRIPT" status || status=1
-    printf '
-== Remote destination status ==
-'
-    bash "$SRC_SCRIPT" remote-dst-status || status=1
-  } >"$tmp" 2>&1
+  (
+    cd "$SCRIPT_DIR"
+    printf '%b' "$input" | NO_COLOR=1 bash "$@"
+  ) >"$raw" 2>&1 || status=$?
+  strip_ansi < "$raw" > "$tmp"
+  rm -f "$raw"
   capture_output "$tmp"
-  (( status == 0 )) || show_error "Status / Report" "$status"
-  show_output "Status / Report" "$tmp"
-  rm -f "$tmp"
+  summary="$(mktemp)"
+  summarize_output "$title" "$status" "$LAST_OUTPUT" > "$summary"
+  show_file_then_details "$title" "$summary" "$tmp"
+  rm -f "$summary" "$tmp"
+  return "$status"
 }
 
+run_command_confirm(){
+  local title="$1" prompt="$2"; shift 2
+  ask_yesno "$title" "$prompt" || return 1
+  run_step "$title" "$title" "$@"
+}
 
 advanced_tools(){
   local choice
   while true; do
-    choice="$(whiptail --title "Advanced Tools" --menu "Individual commands are exposed here for operators who need them." 16 78 5 \
-      "source" "Source Tools" \
-      "destination" "Destination Tools" \
+    choice="$(whiptail --title "Advanced / Legacy" --menu "Individual commands are exposed here for operators who need them." 18 82 6 \
+      "source" "Source tools" \
+      "destination" "Destination tools" \
       "manual" "Manual handoff workflow" \
-      "recovery" "Recovery" \
+      "recovery" "Recovery guidance" \
       "back" "Back" \
       3>&1 1>&2 2>&3)" || return 0
     case "$choice" in
@@ -488,10 +633,10 @@ advanced_source_tools(){
   local cmd
   while true; do
     cmd="$(whiptail --title "Source Tools" --menu "Run a source-side command." 28 82 20 \
-      "remote-prepare" "Prepare destination over SSH" \
-      "remote-export" "Run destination preflight/export/status over SSH" \
-      "remote-dst-status" "Show remote destination status" \
-      "remote-dst-close" "Close remote destination NBD" \
+      "remote-prepare" "Prepare Destination Host over SSH" \
+      "remote-export" "Run Destination preflight/export/status over SSH" \
+      "remote-dst-status" "Show remote Destination status" \
+      "remote-dst-close" "Close remote Destination NBD" \
       "show" "Show config" \
       "next" "Suggested next steps" \
       "preflight" "Run preflight" \
@@ -515,38 +660,19 @@ advanced_source_tools(){
       3>&1 1>&2 2>&3)" || return 0
     case "$cmd" in
       back) return 0 ;;
-      wait-full) run_long_command "Waiting for full sync" "$SRC_SCRIPT" wait-full || true ;;
-      full) run_dangerous_confirmed "Full sync" "Start full sync now?\n\nThis writes to the destination disk." "" "$SRC_SCRIPT" full || true ;;
-      mark-full) run_dangerous_confirmed "Mark full complete" "Mark full sync as completed now?\n\nUse only after confirming the full sync finished successfully." "" "$SRC_SCRIPT" mark-full || true ;;
-      final) run_dangerous_confirmed "Final incremental" "Run final incremental now?\n\nThis will suspend the source VM." "yes\n" "$SRC_SCRIPT" final || true ;;
-      stop-source) run_dangerous_confirmed "Stop source VM" "Stop source VM now?\n\nUse only after final incremental completed." "yes\n" "$SRC_SCRIPT" stop-source || true ;;
-      remote-prepare) advanced_remote_prepare || true ;;
-      remote-export) run_dangerous_confirmed "Remote export" "Start destination NBD export over SSH now?\n\nThis runs destination preflight first, then starts qemu-nbd." "" "$SRC_SCRIPT" remote-export || true ;;
-      remote-dst-close) run_dangerous_confirmed "Remote destination close" "Close destination NBD export over SSH now?" "" "$SRC_SCRIPT" remote-dst-close || true ;;
-      cleanup) run_dangerous_confirmed "Source cleanup" "Run source cleanup now?\n\nThis removes local migration artifacts such as tunnel processes and dirty bitmap when present." "" "$SRC_SCRIPT" cleanup || true ;;
-      *) run_command "Source: ${cmd}" "$SRC_SCRIPT" "$cmd" || true ;;
+      remote-prepare) start_new_migration || true ;;
+      wait-full) run_step wait-full "Wait full sync" "$SRC_SCRIPT" wait-full || true ;;
+      full) run_step full "Start full sync" "$SRC_SCRIPT" full || true ;;
+      mark-full) run_step mark-full "Mark full complete" "$SRC_SCRIPT" mark-full || true ;;
+      final) run_final_sync || true ;;
+      stop-source) run_stop_source || true ;;
+      remote-export) run_step remote-export "Remote export" "$SRC_SCRIPT" remote-export || true ;;
+      remote-dst-close) run_step remote-dst-close "Remote destination close" "$SRC_SCRIPT" remote-dst-close || true ;;
+      cleanup) run_step cleanup "Source cleanup" "$SRC_SCRIPT" cleanup || true ;;
+      *) run_step "$cmd" "Source: $cmd" "$SRC_SCRIPT" "$cmd" || true ;;
     esac
   done
 }
-
-advanced_remote_prepare(){
-  local vm pve_host pve_vmid ssh_port ssh_user
-
-  vm="$(ask_input "Remote prepare" "Source VM name:" "$(current_conf_value VM_NAME "kvm3023")")" || return 0
-  [[ -n "$vm" ]] || return 0
-  pve_host="$(ask_input "Remote prepare" "Destination Proxmox host/IP:" "$(current_conf_value PVE_HOST "CHANGE_ME")")" || return 0
-  [[ -n "$pve_host" && "$pve_host" != "CHANGE_ME" ]] || return 0
-  pve_vmid="$(ask_input "Remote prepare" "Destination Proxmox VMID:" "$(current_conf_value PVE_VMID "")")" || return 0
-  [[ -n "$pve_vmid" ]] || return 0
-  ssh_port="$(ask_input "Remote prepare" "Destination SSH port:" "$(current_conf_value PVE_SSH_PORT "22")")" || return 0
-  [[ -n "$ssh_port" ]] || ssh_port="22"
-  ssh_user="$(ask_input "Remote prepare" "Destination SSH user:" "$(current_conf_value PVE_SSH_USER "root")")" || return 0
-  [[ -n "$ssh_user" ]] || ssh_user="root"
-
-  confirm_remote_prepare_summary "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || return 0
-  run_long_command "Remote prepare" "$SRC_SCRIPT" remote-prepare "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || true
-}
-
 
 advanced_destination_tools(){
   local cmd vmid
@@ -564,16 +690,14 @@ advanced_destination_tools(){
       3>&1 1>&2 2>&3)" || return 0
     case "$cmd" in
       back) return 0 ;;
-      export) run_dangerous_confirmed "Export NBD" "Export NBD now?\n\nThis exposes the destination disk for writing." "" "$DST_SCRIPT" export || true ;;
-      close) run_dangerous_confirmed "Close NBD" "Close destination NBD export now?" "" "$DST_SCRIPT" close || true ;;
-      boot) run_dangerous_confirmed "Boot destination VM" "Boot destination VM now?" "" "$DST_SCRIPT" boot || true ;;
+      export) run_step export "Destination export" "$DST_SCRIPT" export || true ;;
+      close) run_step close "Destination close" "$DST_SCRIPT" close || true ;;
+      boot) run_step boot "Destination boot" "$DST_SCRIPT" boot || true ;;
       quick)
-        vmid="$(ask_input "Destination quick" "Destination VMID:" "$(current_conf_value PVE_VMID "")")" || continue
-        if [[ -n "$vmid" ]]; then
-          run_command_with_input "Destination quick" "yes\n" "$DST_SCRIPT" quick "$vmid" || true
-        fi
+        vmid="$(ask_input "Destination quick" "Destination VMID:" "$(current_conf_value PVE_VMID '')")" || continue
+        [[ -n "$vmid" ]] && run_command_with_input "Destination quick" "yes\n" "$DST_SCRIPT" quick "$vmid" || true
         ;;
-      *) run_command "Destination: ${cmd}" "$DST_SCRIPT" "$cmd" || true ;;
+      *) run_step "$cmd" "Destination: $cmd" "$DST_SCRIPT" "$cmd" || true ;;
     esac
   done
 }
