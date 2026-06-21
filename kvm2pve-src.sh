@@ -349,12 +349,9 @@ EOF
     echo "Set PVE_HOST in $CONFIG_FILE, then run: ./kvm2pve-src.sh preflight"
   else
     cat <<EOF
-1) On destination, start the NBD export before source tunnel/check:
-./kvm2pve-dst.sh preflight
-./kvm2pve-dst.sh export
-
-2) On source, connect and run the full sync:
+1) Prepare the destination export from the source, then run the full sync:
 ./kvm2pve-src.sh preflight
+./kvm2pve-src.sh remote-export
 ./kvm2pve-src.sh tunnel
 ./kvm2pve-src.sh tunnel-check
 ./kvm2pve-src.sh attach-target
@@ -365,18 +362,16 @@ EOF
 ./kvm2pve-src.sh wait-full
 ./kvm2pve-src.sh report
 
-Optional monitor in another terminal:
-./kvm2pve-src.sh watch
-
-3) Before cutover, run on source:
+2) Keep cutover explicit:
 ./kvm2pve-src.sh cutover-check
 ./kvm2pve-src.sh final
 ./kvm2pve-src.sh report
 ./kvm2pve-src.sh stop-source
 
-4) After source final/stop-source succeeds, run on destination:
-./kvm2pve-dst.sh close
-./kvm2pve-dst.sh boot
+3) After final, close the remote destination export:
+./kvm2pve-src.sh remote-dst-close
+
+Then boot the destination manually on Proxmox.
 EOF
   fi
 }
@@ -485,6 +480,7 @@ remote_prepare(){
   [[ "$token" == "$prefix"* ]] || die "Remote handoff token is invalid"
 
   apply_handoff "$token"
+  echo "INFO Source discovery may ask for confirmation before writing SRC_DISK/QEMU_DEVICE/QEMU_NODE."
   discover "$VM_NAME"
   show_config
   remote_prepare_next_steps
