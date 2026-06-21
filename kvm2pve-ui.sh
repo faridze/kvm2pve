@@ -447,7 +447,7 @@ ask_remote_prepare_form(){
       3>&1 1>&2 2>&3)" || { rm -f "$file"; return 1; }
     printf '%s\n' "$values" > "$file"
   else
-    whiptail --title "New Migration" --msgbox "This whiptail build does not support --form.\n\nThe UI will ask the same five values one by one." 10 78 || true
+    whiptail --title "New Migration" --msgbox "This whiptail build does not support --form.\n\nThe UI will ask the same five values one by one." 10 78 1>&2 || true
     vm="$(ask_input "New Migration" "Source VM:" "$default_vm")" || { rm -f "$file"; return 1; }
     host="$(ask_input "New Migration" "Destination Host:" "$default_host")" || { rm -f "$file"; return 1; }
     vmid="$(ask_input "New Migration" "Destination VMID:" "$default_vmid")" || { rm -f "$file"; return 1; }
