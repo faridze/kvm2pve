@@ -808,12 +808,12 @@ create_bitmap(){
 }
 
 backup_job(){
-  local sync="$1" job="$2" extra=""
+  local sync="" job="" extra="" out
   load_config; [[ -n "$QEMU_DEVICE" ]] || die "QEMU_DEVICE is empty. Run discover first."
   if [[ "$sync" == "incremental" ]]; then require_full_completed; fi
   if ! block_jobs_empty; then die "A block job is already present. Run watch/status first."; fi
   if [[ "$sync" == "incremental" ]]; then extra=',"bitmap":"'"$BITMAP"'"'; fi
-  qmp '{
+  out="0 0qmp '{
   "execute":"blockdev-backup",
   "arguments":{
     "device":"'"$QEMU_DEVICE"'",
@@ -824,6 +824,13 @@ backup_job(){
     "auto-dismiss":true
   }
 }'
+)"
+
+  printf '%s\n' ""
+
+  if printf '%s\n' "" | grep -q '"error"'; then
+    die "blockdev-backup failed"
+  fi
 }
 
 full_sync(){
