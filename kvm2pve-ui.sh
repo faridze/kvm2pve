@@ -13,6 +13,10 @@ missing_whiptail(){
   cat <<'EOF'
 whiptail is required for kvm2pve-ui.sh.
 
+Use the CLI remote workflow directly if whiptail is not available:
+  ./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID [SSH_PORT] [SSH_USER]
+  ./kvm2pve-src.sh next
+
 CentOS/RHEL:
   yum install -y newt
 
@@ -172,10 +176,11 @@ current_conf_value(){
 main_menu(){
   local choice
   while true; do
-    choice="$(whiptail --title "kvm2pve Terminal UI v${VERSION}" --menu "Choose an action." 18 78 8 \
-      "start" "Start New Migration" \
+    choice="$(whiptail --title "kvm2pve Terminal UI v${VERSION}" --menu "Choose an action." 20 78 10 \
+      "start" "New Migration - source remote wizard" \
       "continue" "Continue Migration" \
-      "status" "Migration Status" \
+      "status" "Status / Report" \
+      "next" "Next Suggested Commands" \
       "advanced" "Advanced Tools" \
       "exit" "Exit" \
       3>&1 1>&2 2>&3)" || exit 0
@@ -183,26 +188,31 @@ main_menu(){
       start) start_new_migration || true ;;
       continue) continue_migration || true ;;
       status) migration_status || true ;;
+      next) run_command "Next suggested commands" "$SRC_SCRIPT" next || true ;;
       advanced) advanced_tools || true ;;
       exit) exit 0 ;;
     esac
   done
 }
 
+
 start_new_migration(){
+  start_source_remote_flow
+}
+
+manual_handoff_workflow(){
   local choice
-  choice="$(whiptail --title "Start New Migration" --menu "Choose how to bootstrap this migration." 16 78 5 \
-    "source-remote" "Source host - prepare destination over SSH" \
-    "destination" "Destination host - manual token flow" \
+  choice="$(whiptail --title "Manual Handoff Workflow" --menu "Legacy/manual path for hosts where source cannot SSH to destination." 16 82 5 \
+    "destination" "Destination host - generate handoff token" \
     "source" "Source host - paste handoff token" \
     "back" "Back" \
     3>&1 1>&2 2>&3)" || return 0
   case "$choice" in
-    source-remote) start_source_remote_flow || true ;;
     destination) start_destination_flow || true ;;
     source) start_source_flow || true ;;
   esac
 }
+
 
 start_destination_flow(){
   local vmid token tmp
@@ -232,31 +242,73 @@ start_destination_flow(){
   fi
 }
 
+confirm_remote_prepare_summary(){
+  local vm="$1" pve_host="$2" pve_vmid="$3" ssh_port="$4" ssh_user="$5"
+  whiptail --title "Confirm Remote Migration" --yesno "Source VM: $vm\nDestination host: $pve_host\nDestination VMID: $pve_vmid\nSSH user: $ssh_user\nSSH port: $ssh_port\n\nRun remote-prepare from this SOURCE host now?" 15 82
+}
+
 start_source_remote_flow(){
   local vm pve_host pve_vmid ssh_port ssh_user default_vm
 
   default_vm="$(current_conf_value VM_NAME "kvm3023")"
   vm="$(ask_input "Remote prepare" "Source VM name:" "$default_vm")" || return 0
   [[ -n "$vm" ]] || return 0
-  pve_host="$(ask_input "Remote prepare" "Destination Proxmox host/IP reachable from source:" "$(current_conf_value PVE_HOST "CHANGE_ME")")" || return 0
+  pve_host="$(ask_input "Remote prepare" "Destination Proxmox host/IP:" "$(current_conf_value PVE_HOST "CHANGE_ME")")" || return 0
   [[ -n "$pve_host" && "$pve_host" != "CHANGE_ME" ]] || return 0
   pve_vmid="$(ask_input "Remote prepare" "Destination Proxmox VMID:" "$(current_conf_value PVE_VMID "")")" || return 0
   [[ -n "$pve_vmid" ]] || return 0
-  ssh_port="$(ask_input "Remote prepare" "Destination Proxmox SSH port:" "$(current_conf_value PVE_SSH_PORT "22")")" || return 0
+  ssh_port="$(ask_input "Remote prepare" "Destination SSH port:" "$(current_conf_value PVE_SSH_PORT "22")")" || return 0
   [[ -n "$ssh_port" ]] || ssh_port="22"
-  ssh_user="$(ask_input "Remote prepare" "Destination Proxmox SSH user:" "$(current_conf_value PVE_SSH_USER "root")")" || return 0
+  ssh_user="$(ask_input "Remote prepare" "Destination SSH user:" "$(current_conf_value PVE_SSH_USER "root")")" || return 0
   [[ -n "$ssh_user" ]] || ssh_user="root"
 
-  run_command_with_input "Remote prepare" "yes\n" "$SRC_SCRIPT" remote-prepare "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || return 1
-
-  if run_dangerous_confirmed "Remote export" "Start destination NBD export over SSH now?\n\nThis runs destination preflight first, then starts qemu-nbd." "" "$SRC_SCRIPT" remote-export; then
-    if ask_yesno "Safe preparation" "Run source tunnel/target/bitmap preparation now?"; then
-      run_source_prepare_steps || return 1
-    fi
-  fi
-
-  whiptail --title "Remote prepare complete" --msgbox "Remote destination preparation is complete.\n\nUse Continue Migration on the source host for full sync, final incremental, and source stop." 12 78 || true
+  confirm_remote_prepare_summary "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || return 0
+  run_long_command "Remote prepare" "$SRC_SCRIPT" remote-prepare "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || return 1
+  remote_workflow_menu
 }
+
+remote_workflow_menu(){
+  local choice
+  while true; do
+    choice="$(whiptail --title "Source Remote Workflow" --menu "Choose the next explicit action. Final/stop are never run automatically." 25 88 16 \
+      "preflight" "Run preflight" \
+      "remote-export" "Run remote export" \
+      "tunnel" "Start tunnel" \
+      "tunnel-check" "Check tunnel" \
+      "attach-target" "Attach target and check" \
+      "bitmap" "Create and check bitmap" \
+      "full" "Start full sync" \
+      "wait-full" "Wait full sync" \
+      "report" "Show report" \
+      "status-report" "Status / Report" \
+      "next" "Next suggested commands" \
+      "cutover-check" "Cutover check" \
+      "final" "Final sync" \
+      "stop-source" "Stop source" \
+      "remote-dst-close" "Close remote destination export" \
+      "exit" "Exit" \
+      3>&1 1>&2 2>&3)" || return 0
+    case "$choice" in
+      preflight) run_command "Source preflight" "$SRC_SCRIPT" preflight || true ;;
+      remote-export) run_dangerous_confirmed "Remote export" "Start destination NBD export over SSH now?\n\nThis runs destination preflight first, then starts qemu-nbd." "" "$SRC_SCRIPT" remote-export || true ;;
+      tunnel) run_command "Start tunnel" "$SRC_SCRIPT" tunnel || true ;;
+      tunnel-check) run_command "Tunnel check" "$SRC_SCRIPT" tunnel-check || true ;;
+      attach-target) run_command "Attach target" "$SRC_SCRIPT" attach-target && run_command "Check target" "$SRC_SCRIPT" check-target || true ;;
+      bitmap) run_command "Create bitmap" "$SRC_SCRIPT" bitmap && run_command "Check bitmap" "$SRC_SCRIPT" check-bitmap || true ;;
+      full) run_dangerous_confirmed "Full sync" "Start full sync now?\n\nThis writes to the destination disk." "" "$SRC_SCRIPT" full || true ;;
+      wait-full) run_long_command "Waiting for full sync" "$SRC_SCRIPT" wait-full || true ;;
+      report) run_command "Source report" "$SRC_SCRIPT" report || true ;;
+      status-report) migration_status || true ;;
+      next) run_command "Next suggested commands" "$SRC_SCRIPT" next || true ;;
+      cutover-check) run_command "Cutover check" "$SRC_SCRIPT" cutover-check || true ;;
+      final) run_dangerous_confirmed "Final sync" "Run final sync now?\n\nThis will suspend the source VM. Do not run until ready for cutover." "yes\n" "$SRC_SCRIPT" final || true ;;
+      stop-source) run_dangerous_confirmed "Stop source" "Stop source VM now?\n\nUse only after final sync completed." "yes\n" "$SRC_SCRIPT" stop-source || true ;;
+      remote-dst-close) run_dangerous_confirmed "Remote destination close" "Close destination NBD export over SSH now?" "" "$SRC_SCRIPT" remote-dst-close || true ;;
+      exit) return 0 ;;
+    esac
+  done
+}
+
 
 start_source_flow(){
   local token vm default_vm pve_host ssh_port input
@@ -388,31 +440,29 @@ continue_destination(){
 }
 
 migration_status(){
-  local choice tmp status
-  choice="$(whiptail --title "Migration Status" --menu "Choose status view." 14 78 4 \
-    "source" "Source status" \
-    "destination" "Destination status" \
-    "back" "Back" \
-    3>&1 1>&2 2>&3)" || return 0
-  case "$choice" in
-    source)
-      tmp="$(mktemp)"
-      status=0
-      (
-        cd "$SCRIPT_DIR"
-        printf '== Source report ==\n'
-        bash "$SRC_SCRIPT" report
-        printf '\n== Source status ==\n'
-        bash "$SRC_SCRIPT" status
-      ) >"$tmp" 2>&1 || status=$?
-      capture_output "$tmp"
-      (( status == 0 )) || show_error "Source status" "$status"
-      show_output "Source status" "$tmp"
-      rm -f "$tmp"
-      ;;
-    destination) run_command "Destination status" "$DST_SCRIPT" status || true ;;
-  esac
+  local tmp status
+  tmp="$(mktemp)"
+  status=0
+  {
+    cd "$SCRIPT_DIR" || status=1
+    printf '== Source report ==
+'
+    bash "$SRC_SCRIPT" report || status=1
+    printf '
+== Source status ==
+'
+    bash "$SRC_SCRIPT" status || status=1
+    printf '
+== Remote destination status ==
+'
+    bash "$SRC_SCRIPT" remote-dst-status || status=1
+  } >"$tmp" 2>&1
+  capture_output "$tmp"
+  (( status == 0 )) || show_error "Status / Report" "$status"
+  show_output "Status / Report" "$tmp"
+  rm -f "$tmp"
 }
+
 
 advanced_tools(){
   local choice
@@ -420,12 +470,14 @@ advanced_tools(){
     choice="$(whiptail --title "Advanced Tools" --menu "Individual commands are exposed here for operators who need them." 16 78 5 \
       "source" "Source Tools" \
       "destination" "Destination Tools" \
+      "manual" "Manual handoff workflow" \
       "recovery" "Recovery" \
       "back" "Back" \
       3>&1 1>&2 2>&3)" || return 0
     case "$choice" in
       source) advanced_source_tools || true ;;
       destination) advanced_destination_tools || true ;;
+      manual) manual_handoff_workflow || true ;;
       recovery) recovery_guidance || true ;;
       back) return 0 ;;
     esac
@@ -486,13 +538,15 @@ advanced_remote_prepare(){
   [[ -n "$pve_host" && "$pve_host" != "CHANGE_ME" ]] || return 0
   pve_vmid="$(ask_input "Remote prepare" "Destination Proxmox VMID:" "$(current_conf_value PVE_VMID "")")" || return 0
   [[ -n "$pve_vmid" ]] || return 0
-  ssh_port="$(ask_input "Remote prepare" "Destination Proxmox SSH port:" "$(current_conf_value PVE_SSH_PORT "22")")" || return 0
+  ssh_port="$(ask_input "Remote prepare" "Destination SSH port:" "$(current_conf_value PVE_SSH_PORT "22")")" || return 0
   [[ -n "$ssh_port" ]] || ssh_port="22"
-  ssh_user="$(ask_input "Remote prepare" "Destination Proxmox SSH user:" "$(current_conf_value PVE_SSH_USER "root")")" || return 0
+  ssh_user="$(ask_input "Remote prepare" "Destination SSH user:" "$(current_conf_value PVE_SSH_USER "root")")" || return 0
   [[ -n "$ssh_user" ]] || ssh_user="root"
 
-  run_command_with_input "Remote prepare" "yes\n" "$SRC_SCRIPT" remote-prepare "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || true
+  confirm_remote_prepare_summary "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || return 0
+  run_long_command "Remote prepare" "$SRC_SCRIPT" remote-prepare "$vm" "$pve_host" "$pve_vmid" "$ssh_port" "$ssh_user" || true
 }
+
 
 advanced_destination_tools(){
   local cmd vmid

@@ -191,27 +191,30 @@ prints the next commands, and leaves `export`, `full`, `final`, `stop-source`,
 
 ## Terminal UI
 
-Run:
+Run on the source host when the source can SSH to the destination Proxmox host:
 
 ```bash
 ./kvm2pve-ui.sh
 ```
 
-Recommended usage:
+`Start New Migration` now uses the source-driven remote workflow by default. It
+asks for the source VM name, destination host/IP, destination VMID, SSH port,
+and SSH user, then runs:
 
-1. Run UI on destination.
-2. Choose Start New Migration > Destination host.
-3. Copy the handoff token.
-4. Export NBD when prompted.
-5. Run UI on source.
-6. Choose Start New Migration > Source host.
-7. Paste handoff token.
-8. Follow guided confirmations.
-9. Return to destination.
-10. Choose Continue Migration and close + boot.
+```bash
+./kvm2pve-src.sh remote-prepare VM_NAME PVE_HOST PVE_VMID SSH_PORT SSH_USER
+```
 
-The UI uses `whiptail` and is optional. The CLI scripts still work directly,
-dangerous actions still require confirmation, and the UI does not implement
+`remote-prepare` may ask for source discovery confirmation, and the UI leaves
+that interaction visible in the terminal so the operator can answer yes/no.
+After preparation, the UI shows explicit next actions for preflight,
+remote-export, tunnel, target attach, bitmap, full sync, wait-full, report,
+cutover checks, final sync, stop-source, and remote destination close.
+
+The manual handoff workflow is still available under Advanced Tools for cases
+where the source host cannot SSH to the destination. The UI uses `whiptail` and
+is optional. If `whiptail` is missing, use the CLI remote workflow directly.
+Dangerous actions still require confirmation, and the UI does not implement
 `resume-full`.
 
 ## Manual handoff workflow
