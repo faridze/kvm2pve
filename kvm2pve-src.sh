@@ -945,11 +945,17 @@ tunnel_check(){
     warn "qemu-io not found; skipped read sample."
     return 0
   fi
-  if timeout "${NBD_IO_TIMEOUT:-20}" qemu-io -f raw -c "read 0 4k" "nbd://127.0.0.1:${NBD_PORT}/${NBD_EXPORT}"; then
-    ok "NBD read sample succeeded"
-  else
-    nbd_read_sample_warning
-  fi
+  local i
+  for i in 1 2 3; do
+    if timeout "${NBD_IO_TIMEOUT:-20}" qemu-io -f raw -c "read 0 4k" "nbd://127.0.0.1:${NBD_PORT}/${NBD_EXPORT}"; then
+      ok "NBD read sample succeeded"
+      return 0
+    fi
+    warn "NBD read sample attempt $i failed/timed out"
+    sleep 2
+  done
+
+  nbd_read_sample_warning
 }
 
 tunnel_status(){
