@@ -130,6 +130,9 @@ Optional monitor:
 ./kvm2pve-src.sh watch
 ```
 
+`watch` is read-only. It does not dismiss jobs or change VM/state. Use
+`wait-full`, `wait-inc`, or `final` to wait for and dismiss concluded jobs.
+
 Cutover:
 
 ```bash

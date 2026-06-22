@@ -1305,23 +1305,55 @@ EOF
 
 watch_jobs(){
   load_config
+  local out job status parsed_status offset len progress interactive=0
+  if [[ -t 1 && "${DEBUG:-0}" != "1" ]]; then
+    interactive=1
+  fi
   while true; do
-    clear || true
-    qmp '{"execute":"query-block-jobs"}' | awk '
-      /"offset"/ {gsub(/[^0-9]/,"",$2); offset=$2}
-      /"len"/ {gsub(/[^0-9]/,"",$2); len=$2}
-      /"status"/ {gsub(/[",]/,"",$2); status=$2}
-      /"device"/ {gsub(/[",]/,"",$2); device=$2}
-      /"error"/ {err=$0}
-      END {
-        if (len > 0) {
-          pct=int((offset*100)/len)
-          printf "Job: %s\nProgress: %d%%\nOffset: %s\nTotal: %s\nStatus: %s\n", device, pct, offset, len, status
-          if (err != "") print err
-        } else {
-          print "No active block job. If this was full, run: ./kvm2pve-src.sh mark-full"
-        }
-      }'
+    if (( interactive )); then
+      clear || true
+      cat <<EOF
+kvm2pve watch
+VM: $VM_NAME
+Backup method: $(effective_backup_method)
+EOF
+    fi
+
+    if ! out="$(block_jobs_json 2>/dev/null)"; then
+      warn "QMP query timed out"
+      sleep 2
+      continue
+    fi
+
+    if printf '%s\n' "$out" | grep -q '"error"'; then
+      printf '%s\n' "$out"
+      sleep 2
+      continue
+    fi
+
+    if ! printf '%s\n' "$out" | grep -q '"type"'; then
+      echo "No active block job."
+      sleep 2
+      continue
+    fi
+
+    job="$(printf '%s\n' "$out" | awk -F'"' '/"device"/ {print $4; exit}')"
+    status="$(printf '%s\n' "$out" | awk -F'"' '/"status"/ {print $4; exit}')"
+    IFS=$'	' read -r offset len parsed_status <<< "$(printf '%s\n' "$out" | progress_from_jobs_json)"
+    [[ -n "$parsed_status" ]] && status="$parsed_status"
+    progress="$(progress_line "$offset" "$len" "${status:-running}")"
+
+    if (( interactive )); then
+      printf 'Job: %s\n%s\n' "${job:-unknown}" "$progress"
+    else
+      printf 'Job: %s | %s\n' "${job:-unknown}" "$progress"
+    fi
+
+    if [[ "$status" == "concluded" ]]; then
+      echo "Job concluded."
+      echo "Run: ./kvm2pve-src.sh jobs-dismiss-all"
+    fi
+
     sleep 2
   done
 }
