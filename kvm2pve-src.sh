@@ -1498,6 +1498,17 @@ EOF
   check_bitmap
   report
 
+  if ! block_jobs_empty; then
+    warn "Existing block job found before FULL sync."
+    jobs_cmd
+    warn "Trying to dismiss concluded/stale jobs before FULL sync."
+    jobs_dismiss_all
+    if ! block_jobs_empty; then
+      jobs_cmd
+      die "A block job is still present. Resolve it before starting FULL sync."
+    fi
+  fi
+
   cat <<EOF
 
 Preparation completed.
