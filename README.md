@@ -375,3 +375,17 @@ a prepared destination disk. Do not point it at a disk containing data you need.
 
 `stop-source` only stops/destroys the source VM. It must never delete disks or
 storage.
+
+### Closing a migration session
+
+`remote-dst-close` closes only the destination qemu-nbd export.
+
+`remote-dst-close` does not stop the SSH tunnel.
+
+To completely close a migration session:
+
+    ./kvm2pve-src.sh tunnel-stop
+    ./kvm2pve-src.sh remote-dst-close
+
+TCP states such as `FIN-WAIT-2` or `CLOSE-WAIT` may remain briefly and are usually harmless. The important check is that no `qemu-nbd` listener remains on port `10809`.
+
