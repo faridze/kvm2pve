@@ -1575,11 +1575,6 @@ EOF
   fi
 
   cutover_check
-  cat <<EOF
-
-Suspend source VM and run FINAL incremental now?
-EOF
-  ask_exact "Type CUTOVER:" "CUTOVER" || die "Aborted"
   final_cutover_run
   report
 
