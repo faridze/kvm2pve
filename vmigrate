@@ -573,10 +573,54 @@ remote_prepare(){
   remote_prepare_next_steps
 }
 
+remote_export_once(){
+  local allow_stop="${1:-0}" env_prefix=""
+  [[ "$allow_stop" == "1" ]] && env_prefix="VMIGRATE_ALLOW_STOP_TARGET=1 "
+  remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent doctor && ${env_prefix}./vmigrate-agent export && ./vmigrate-agent status"
+}
+
 remote_export(){
   load_config
   need ssh
-  remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent doctor && ./vmigrate-agent export && ./vmigrate-agent status"
+
+  local out rc attempt allow_stop=0 did_cleanup=0
+
+  for attempt in 1 2 3; do
+    set +e
+    out="$(remote_export_once "$allow_stop" 2>&1)"
+    rc=$?
+    set -e
+
+    printf '%s\n' "$out"
+
+    if [[ "$rc" == "0" ]]; then
+      return 0
+    fi
+
+    if [[ "$allow_stop" != "1" ]] && printf '%s\n' "$out" | grep -q "Target VM .* is running"; then
+      warn "Destination target VM appears to be running."
+      if ask_yes_default "Stop the destination VM remotely and retry NBD export?"; then
+        allow_stop=1
+        continue
+      fi
+      die "Remote export failed because destination VM is running."
+    fi
+
+    if [[ "$did_cleanup" != "1" ]] && printf '%s\n' "$out" | grep -q "NBD port already in use"; then
+      warn "Remote NBD export port appears to be already in use."
+      if ask_yes_default "Close remote NBD export, stop local tunnel, and retry remote-export?"; then
+        did_cleanup=1
+        tunnel_stop || warn "Local tunnel stop failed or no tunnel was found."
+        remote_dst_close || warn "Remote NBD close failed or no export was found."
+        continue
+      fi
+      die "Remote export failed because NBD port is already in use."
+    fi
+
+    return "$rc"
+  done
+
+  die "Remote export failed after recovery attempts."
 }
 
 remote_dst_status(){

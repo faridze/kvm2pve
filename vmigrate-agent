@@ -39,6 +39,17 @@ EOF
 
 ask(){ local var="$1" prompt="$2" def="${3:-}" val; read -r -p "$prompt${def:+ [$def]}: " val; printf -v "$var" '%s' "${val:-$def}"; }
 confirm(){ local prompt="$1" ans; read -r -p "$prompt [yes/no]: " ans; [[ "$ans" == "yes" ]]; }
+ask_yes_default(){
+  local prompt="$1" ans
+  while true; do
+    read -r -p "$prompt [Y/n]: " ans
+    case "$ans" in
+      ""|Y|y) return 0 ;;
+      N|n) return 1 ;;
+      *) echo "Please answer Y or N." ;;
+    esac
+  done
+}
 
 get_conf(){ local key="$1"; [[ -f "$CONFIG_FILE" ]] || return 0; awk -F= -v k="$key" '$1==k {print substr($0, index($0,"=")+1); exit}' "$CONFIG_FILE"; }
 
@@ -274,6 +285,13 @@ export_disk(){
         if [[ "${VMIGRATE_ALLOW_STOP_TARGET:-0}" == "1" ]]; then
           warn "VMIGRATE_ALLOW_STOP_TARGET=1 set; stopping running target VM $TARGET_ID before export"
           qm stop "$TARGET_ID" || die "Failed to stop running target VM $TARGET_ID"
+        elif [[ -t 0 ]]; then
+          warn "Target VM $TARGET_ID is running. Exporting a running destination disk is unsafe."
+          if ask_yes_default "Stop target VM $TARGET_ID now and continue export?"; then
+            qm stop "$TARGET_ID" || die "Failed to stop running target VM $TARGET_ID"
+          else
+            die "Target VM $TARGET_ID is running. Refusing to export its disk."
+          fi
         else
           die "Target VM $TARGET_ID is running. Refusing to export its disk. Stop it manually or set VMIGRATE_ALLOW_STOP_TARGET=1 to allow vmigrate-agent export to stop it."
         fi
