@@ -120,6 +120,32 @@ write_key(){
 
 now_ts(){ date '+%Y-%m-%d %H:%M:%S %z'; }
 config_dir(){ case "$CONFIG_FILE" in */*) printf '%s' "${CONFIG_FILE%/*}" ;; *) printf '.' ;; esac; }
+
+IN_CREATE_WORKFLOW=0
+LOG_STARTED=0
+LOG_FILE=""
+
+in_create_workflow(){ [[ "${IN_CREATE_WORKFLOW:-0}" == "1" ]]; }
+
+next_hint(){
+  in_create_workflow && return 0
+  printf '%s\n' "$*"
+}
+
+start_log(){
+  local vm="${1:-unknown}" log_dir
+  [[ "${VMIGRATE_LOG:-1}" == "0" ]] && return 0
+  (( LOG_STARTED )) && return 0
+
+  log_dir="$(config_dir)"
+  mkdir -p "$log_dir"
+  LOG_FILE="${log_dir}/vmigrate-$(sanitize_name "$vm")-$(date '+%Y%m%d-%H%M%S').log"
+  LOG_STARTED=1
+
+  exec > >(tee -a "$LOG_FILE") 2>&1
+  ok "Log file: $LOG_FILE"
+}
+
 state_file(){
   local vm
   vm="${VM_NAME:-$(get_conf VM_NAME)}"
@@ -517,7 +543,7 @@ EOF
 }
 
 remote_prepare(){
-  local vm="${1:-}" target_host="${2:-}" target_id="${3:-}" ssh_port="${4:-22}" ssh_user="${5:-root}"
+  local vm="${1:-}" target_host="${2:-}" target_id="${3:-}" ssh_port="${4:-22}" ssh_user="${5:-root}" show_next="${6:-1}"
   local dst_script rdir token prefix="VMIGRATE_HANDOFF_V1:"
 
   [[ -n "$vm" && -n "$target_host" && -n "$target_id" ]] || die "Usage: ./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]"
@@ -570,7 +596,9 @@ remote_prepare(){
   source "$CONFIG_FILE"
   [[ -n "${SRC_DISK:-}" && ( -b "$SRC_DISK" || -f "$SRC_DISK" ) && -n "${QEMU_DEVICE:-}" && -n "${QEMU_NODE:-}" ]] || die "Source discovery did not write valid SRC_DISK/QEMU_DEVICE/QEMU_NODE. Run: ./vmigrate discover $VM_NAME"
   show_config
-  remote_prepare_next_steps
+  if [[ "$show_next" == "1" ]]; then
+    remote_prepare_next_steps
+  fi
 }
 
 remote_export_once(){
@@ -982,7 +1010,7 @@ start_tunnel(){
   for i in $(seq 1 "${CHECK_TIMEOUT:-8}"); do
     if tunnel_listener_exists; then
       ok "Tunnel listener is ready on 127.0.0.1:${NBD_PORT}"
-      echo "Run next: ./vmigrate tunnel-check"
+      next_hint "Run next: ./vmigrate tunnel-check"
       return 0
     fi
     sleep 1
@@ -1306,7 +1334,11 @@ full_sync(){
   state_write FULL_JOB_ID full
   state_write FULL_COMPLETED 0
   state_write FULL_COMPLETED_AT ""
-  ok "Full sync job submitted. Run: ./vmigrate wait-full"
+  if in_create_workflow; then
+    ok "Full sync job submitted"
+  else
+    ok "Full sync job submitted. Run: ./vmigrate wait-full"
+  fi
 }
 
 mark_full(){
@@ -1330,7 +1362,11 @@ wait_full(){
 
 incremental_sync(){
   backup_job incremental inc1
-  ok "Incremental sync job submitted. Run: ./vmigrate wait-inc"
+  if in_create_workflow; then
+    ok "Incremental sync job submitted"
+  else
+    ok "Incremental sync job submitted. Run: ./vmigrate wait-inc"
+  fi
 }
 
 wait_inc(){
@@ -1730,6 +1766,9 @@ create_workflow(){
   case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric" ;; esac
   [[ -n "$ssh_user" ]] || die "SSH user must not be empty"
 
+  IN_CREATE_WORKFLOW=1
+  start_log "$vm"
+
   cat <<EOF
 vmigrate migration
 -----------------
@@ -1742,7 +1781,7 @@ EOF
 
   create_preparation_guard "$vm"
   ask_exact "Continue with preparation? Type YES:" "YES" || die "Aborted"
-  remote_prepare "$vm" "$target_host" "$target_id" "$ssh_port" "$ssh_user"
+  remote_prepare "$vm" "$target_host" "$target_id" "$ssh_port" "$ssh_user" 0
   preflight
 
   write_key BACKUP_METHOD drive-backup
