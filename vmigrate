@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.4"
+VERSION="0.4.5"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -59,6 +59,8 @@ Usage:
   ./vmigrate active
   ./vmigrate use VM_NAME RUN_ID
   ./vmigrate use RUN_DIR
+  ./vmigrate env VM_NAME RUN_ID
+  ./vmigrate env RUN_DIR
   ./vmigrate clear-active
   ./vmigrate apply-handoff HANDOFF_TOKEN
   ./vmigrate remote-prepare VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]
@@ -374,6 +376,27 @@ run_active(){
 run_clear_active(){
   rm -f "$ACTIVE_FILE"
   ok "Active run cleared. Fallback config: $DEFAULT_CONFIG_FILE"
+}
+
+run_env(){
+  local first="${1:-}" second="${2:-}" dir
+
+  [[ -n "$first" ]] || die "Usage: ./vmigrate env VM_NAME RUN_ID  OR  ./vmigrate env RUN_DIR"
+
+  if [[ -n "$second" ]]; then
+    dir="$(runs_base_dir)/$(sanitize_name "$first")/$second"
+  else
+    dir="$first"
+    case "$dir" in
+      /*) ;;
+      *) [[ -d "$SCRIPT_DIR/$dir" ]] && dir="$SCRIPT_DIR/$dir" ;;
+    esac
+  fi
+
+  [[ -d "$dir" ]] || die "Run directory not found: $dir"
+  [[ -f "$dir/config" ]] || die "Run config not found: $dir/config"
+
+  printf "export VMIGRATE_CONFIG='%s/config'\n" "$dir"
 }
 
 
@@ -2202,6 +2225,7 @@ case "$cmd" in
   list) runs_list ;;
   active) run_active ;;
   use) run_use "${1:-}" "${2:-}" ;;
+  env) run_env "${1:-}" "${2:-}" ;;
   clear-active) run_clear_active ;;
   apply-handoff) apply_handoff "${1:-}" ;;
   remote-prepare) remote_prepare "${1:-}" "${3:-}" "${2:-}" "${4:-22}" "${5:-root}" ;;
