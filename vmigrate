@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.26"
+VERSION="0.4.27"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2687,7 +2687,7 @@ cleanup_stale(){
   lock="$(lock_path_for_vm "$VM_NAME")"
   if [[ -d "$lock" ]]; then
     pid="$(awk -F= '$1=="PID"{print $2; exit}' "$lock/info" 2>/dev/null || true)"
-    if [[ -z "$pid" || ! kill -0 "$pid" 2>/dev/null ]]; then
+    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
       rm -rf "$lock"
       ok "Removed stale lock: $lock"
     else
