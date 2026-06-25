@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.22"
+VERSION="0.4.23"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -301,11 +301,12 @@ runs_list(){
   base="$(runs_base_dir)"
   active="$(active_run_dir 2>/dev/null || true)"
 
-  printf '%-6s %-18s %-15s %-15s %-5s %-5s %s\n' "ACTIVE" "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "DIR"
+  printf '%-6s %-18s %-20s %-15s %-5s %-5s %s\n' "ACTIVE" "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "REL_DIR"
 
   shopt -s nullglob
   for dir in "$base"/*/*; do
     [[ -d "$dir" ]] || continue
+    case "$dir" in "$base"/batches/*) continue ;; esac
     found=1
     cfg="$dir/config"
     vm="${dir%/*}"
@@ -331,7 +332,8 @@ runs_list(){
     mark=""
     [[ -n "$active" && "$dir" == "$active" ]] && mark="*"
 
-    printf '%-6s %-18s %-15s %-15s %-5s %-5s %s\n' "$mark" "$vm" "$run" "$status" "$full" "$final" "$dir"
+    rel_dir="migrations/${dir#"$base"/}"
+    printf '%-6s %-18s %-20s %-15s %-5s %-5s %s\n' "$mark" "$vm" "$run" "$status" "$full" "$final" "$rel_dir"
   done
   shopt -u nullglob
 
@@ -1859,6 +1861,28 @@ random_u64(){
   od -An -N8 -tu8 /dev/urandom 2>/dev/null | awk '{print $1}'
 }
 
+verify_hash_local(){
+  local disk="$1" skip_mb="$2" chunk_mb="$3"
+  set +e
+  local h rc
+  h="$(dd if="$disk" bs=1M skip="$skip_mb" count="$chunk_mb" iflag=fullblock status=none 2>/tmp/vmigrate-verify-local.err | md5sum | awk '{print $1}')"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 0 && -n "$h" ]] || return 1
+  printf '%s\n' "$h"
+}
+
+verify_hash_remote(){
+  local disk="$1" skip_mb="$2" chunk_mb="$3" cmd h rc
+  cmd="dd if='$disk' bs=1M skip=$skip_mb count=$chunk_mb iflag=fullblock status=none 2>/tmp/vmigrate-verify-remote.err | md5sum | awk '{print \$1}'"
+  set +e
+  h="$(remote_ssh "$cmd" | tail -n1)"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 0 && -n "$h" ]] || return 1
+  printf '%s\n' "$h"
+}
+
 sample_verify(){
   load_config
   need dd
@@ -1914,9 +1938,21 @@ EOF
     [[ "$rnd" =~ ^[0-9]+$ ]] || rnd="$RANDOM"
     skip_mb=$(( rnd % (max_start_mb + 1) ))
 
-    src_hash="$(dd if="$SRC_DISK" bs=1M skip="$skip_mb" count="$chunk_mb" iflag=fullblock status=none 2>/dev/null | md5sum | awk '{print $1}')"
-    target_cmd="dd if='$TARGET_DISK' bs=1M skip=$skip_mb count=$chunk_mb iflag=fullblock status=none 2>/dev/null | md5sum | awk '{print \$1}'"
-    target_hash="$(remote_ssh "$target_cmd" | tail -n1)"
+    if ! src_hash="$(verify_hash_local "$SRC_DISK" "$skip_mb" "$chunk_mb")"; then
+      echo
+      warn "Could not read source sample $i/$samples at offset ${skip_mb}MiB"
+      [[ -s /tmp/vmigrate-verify-local.err ]] && cat /tmp/vmigrate-verify-local.err
+      failed=1
+      break
+    fi
+
+    if ! target_hash="$(verify_hash_remote "$TARGET_DISK" "$skip_mb" "$chunk_mb")"; then
+      echo
+      warn "Could not read target sample $i/$samples at offset ${skip_mb}MiB"
+      warn "Check SSH access and target disk path."
+      failed=1
+      break
+    fi
 
     if [[ -z "$src_hash" || -z "$target_hash" || "$src_hash" != "$target_hash" ]]; then
       echo
