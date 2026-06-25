@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.12"
+VERSION="0.4.13"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2293,6 +2293,7 @@ batch_full(){
 
   ok "Batch directory: $batch_dir"
 
+  set +e
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%%#*}"
     line="$(printf '%s' "$line" | awk '{$1=$1; print}')"
@@ -2340,6 +2341,7 @@ batch_full(){
       continue
     fi
   done < "$file"
+  set -e
 
   {
     echo
