@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.9"
+VERSION="0.4.10"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2230,7 +2230,17 @@ EOF
   write_key BACKUP_METHOD drive-backup
   load_config
 
-  remote_export
+  # Batch mode is non-interactive. Clean stale tunnel/export for this run and retry once.
+  tunnel_stop || true
+  remote_dst_close || true
+
+  remote_export || {
+    warn "remote-export failed. Trying stale export cleanup and retrying once..."
+    tunnel_stop || true
+    remote_dst_close || true
+    remote_export
+  }
+
   start_tunnel
   tunnel_check || die "NBD metadata check failed. Fix tunnel/export before migration."
 
