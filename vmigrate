@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.15"
+VERSION="0.4.16"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2196,6 +2196,27 @@ batch_write_line(){
   printf '%s\n' "$line" >> "$batch_dir/summary.txt"
 }
 
+batch_remote_kill_nbd_port(){
+  local port="${NBD_PORT:-10809}" host="${TARGET_HOST:-}" ssh_port="${SSH_PORT:-22}" ssh_user="${SSH_USER:-root}"
+  [[ -n "$host" ]] || return 0
+  warn "Checking stale remote qemu-nbd on ${host}:${port}"
+
+  ssh -p "$ssh_port" -o BatchMode=yes -o ConnectTimeout=10 "${ssh_user}@${host}" "sh -c '
+    line=\$(ss -lntp 2>/dev/null | grep \"127.0.0.1:${port}\" | grep qemu-nbd | head -n1 || true)
+    [ -n \"\$line\" ] || exit 0
+    pid=\$(printf \"%s\n\" \"\$line\" | sed -n \"s/.*pid=\\([0-9][0-9]*\\).*/\\1/p\" | head -n1)
+    [ -n \"\$pid\" ] || exit 1
+    echo \"Killing stale qemu-nbd pid=\$pid on port ${port}\"
+    kill \"\$pid\" 2>/dev/null || true
+    sleep 1
+    if ss -lntp 2>/dev/null | grep \"127.0.0.1:${port}\" | grep -q qemu-nbd; then
+      kill -9 \"\$pid\" 2>/dev/null || true
+      sleep 1
+    fi
+    ss -lntp 2>/dev/null | grep \"127.0.0.1:${port}\" | grep qemu-nbd && exit 1 || exit 0
+  '" || warn "Could not kill stale remote qemu-nbd on port $port"
+}
+
 batch_prepare_full_one(){
   local vm="$1" target_id="$2" target_host="$3" ssh_port="${4:-22}" ssh_user="${5:-root}" batch_id="${6:-}"
   [[ -n "$vm" && -n "$target_id" && -n "$target_host" ]] || die "batch entry requires: VM_NAME TARGET_ID TARGET_HOST [SSH_PORT] [SSH_USER]"
@@ -2233,11 +2254,13 @@ EOF
   # Batch mode is non-interactive. Clean stale tunnel/export for this run and retry once.
   tunnel_stop || true
   remote_dst_close || true
+  batch_remote_kill_nbd_port || true
 
   remote_export || {
     warn "remote-export failed. Trying stale export cleanup and retrying once..."
     tunnel_stop || true
     remote_dst_close || true
+    batch_remote_kill_nbd_port || true
     remote_export
   }
 
