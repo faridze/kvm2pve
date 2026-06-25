@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.23"
+VERSION="0.4.24"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -411,9 +411,9 @@ version_cmd(){
 
   if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     local branch commit dirty
-    branch="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-    commit="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    if git -C "$SCRIPT_DIR" diff --quiet --ignore-submodules -- 2>/dev/null && git -C "$SCRIPT_DIR" diff --cached --quiet --ignore-submodules -- 2>/dev/null; then
+    branch="$(cd "$SCRIPT_DIR" 2>/dev/null && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    commit="$(cd "$SCRIPT_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    if (cd "$SCRIPT_DIR" 2>/dev/null && git diff --quiet --ignore-submodules -- 2>/dev/null && git diff --cached --quiet --ignore-submodules -- 2>/dev/null); then
       dirty="no"
     else
       dirty="yes"
@@ -1919,6 +1919,7 @@ sample_verify(){
   [[ "$usable_size" -gt "$chunk_bytes" ]] || die "Disk is smaller than verify chunk size"
 
   max_start_mb=$(( (usable_size - chunk_bytes) / 1024 / 1024 ))
+  [[ "$max_start_mb" -lt 0 ]] && max_start_mb=0
   compared_bytes=$(( samples * chunk_bytes ))
 
   cat <<EOF
@@ -1934,8 +1935,8 @@ EOF
   start_ts="$(date +%s)"
 
   for ((i=1; i<=samples; i++)); do
-    rnd="$(random_u64)"
-    [[ "$rnd" =~ ^[0-9]+$ ]] || rnd="$RANDOM"
+    rnd=$(( (RANDOM << 15) | RANDOM ))
+    [[ "$rnd" -lt 0 ]] && rnd=$(( -rnd ))
     skip_mb=$(( rnd % (max_start_mb + 1) ))
 
     if ! src_hash="$(verify_hash_local "$SRC_DISK" "$skip_mb" "$chunk_mb")"; then
