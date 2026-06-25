@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.17"
+VERSION="0.4.18"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -1449,12 +1449,12 @@ create_bitmap(){
 
   out="$(qmp '{"execute":"block-dirty-bitmap-add","arguments":{"node":"'"$QEMU_NODE"'","name":"'"$BITMAP"'"}}')"
 
-  printf '%s\n' "$out"
-
   if printf '%s\n' "$out" | grep -q '"error"'; then
+    printf '%s\n' "$out"
     die "block-dirty-bitmap-add failed"
   fi
 
+  ok "Bitmap created: $BITMAP"
   verify_bitmap
 }
 
