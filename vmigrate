@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.18"
+VERSION="0.4.19"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -1676,9 +1676,8 @@ backup_job(){
       ;;
   esac
 
-  printf '%s\n' "$out"
-
   if printf '%s\n' "$out" | grep -q '"error"'; then
+    printf '%s\n' "$out"
     die "$method failed"
   fi
 }
