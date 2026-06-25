@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.21"
+VERSION="0.4.25"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -52,6 +52,7 @@ usage(){ cat <<EOF
 vmigrate v${VERSION}
 
 Usage:
+  ./vmigrate version
   ./vmigrate discover [VM_NAME] [--yes]
   ./vmigrate init
   ./vmigrate show
@@ -99,7 +100,8 @@ Usage:
   ./vmigrate watch
   ./vmigrate status
   ./vmigrate report
-  ./vmigrate verify-sample
+  ./vmigrate verify [SAMPLES]
+  ./vmigrate verify-sample [SAMPLES]
   ./vmigrate cleanup
   ./vmigrate stop-source
 
@@ -164,6 +166,7 @@ now_ts(){ date '+%Y-%m-%d %H:%M:%S %z'; }
 config_dir(){ case "$CONFIG_FILE" in */*) printf '%s' "${CONFIG_FILE%/*}" ;; *) printf '.' ;; esac; }
 
 IN_CREATE_WORKFLOW=0
+IN_BATCH_WORKFLOW=0
 LOG_STARTED=0
 LOG_FILE=""
 RUN_ID=""
@@ -298,11 +301,12 @@ runs_list(){
   base="$(runs_base_dir)"
   active="$(active_run_dir 2>/dev/null || true)"
 
-  printf '%-6s %-18s %-15s %-15s %-5s %-5s %s\n' "ACTIVE" "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "DIR"
+  printf '%-6s %-18s %-20s %-15s %-5s %-5s %s\n' "ACTIVE" "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "REL_DIR"
 
   shopt -s nullglob
   for dir in "$base"/*/*; do
     [[ -d "$dir" ]] || continue
+    case "$dir" in "$base"/batches/*) continue ;; esac
     found=1
     cfg="$dir/config"
     vm="${dir%/*}"
@@ -328,7 +332,8 @@ runs_list(){
     mark=""
     [[ -n "$active" && "$dir" == "$active" ]] && mark="*"
 
-    printf '%-6s %-18s %-15s %-15s %-5s %-5s %s\n' "$mark" "$vm" "$run" "$status" "$full" "$final" "$dir"
+    rel_dir="migrations/${dir#"$base"/}"
+    printf '%-6s %-18s %-20s %-15s %-5s %-5s %s\n' "$mark" "$vm" "$run" "$status" "$full" "$final" "$rel_dir"
   done
   shopt -u nullglob
 
@@ -398,6 +403,38 @@ run_env(){
   [[ -f "$dir/config" ]] || die "Run config not found: $dir/config"
 
   printf "export VMIGRATE_CONFIG='%s/config'\n" "$dir"
+}
+
+version_cmd(){
+  echo "vmigrate $VERSION"
+  echo
+
+  if command -v git >/dev/null 2>&1; then
+    local branch commit dirty
+    branch="$(cd "$SCRIPT_DIR" 2>/dev/null && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    commit="$(cd "$SCRIPT_DIR" 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    if (cd "$SCRIPT_DIR" 2>/dev/null && git diff --quiet --ignore-submodules -- 2>/dev/null && git diff --cached --quiet --ignore-submodules -- 2>/dev/null); then
+      dirty="no"
+    else
+      dirty="yes"
+    fi
+
+    cat <<EOF
+Git:
+  Branch : $branch
+  Commit : $commit
+  Dirty  : $dirty
+EOF
+  else
+    echo "Git information unavailable"
+  fi
+
+  cat <<EOF
+
+Paths:
+  Base   : $SCRIPT_DIR
+  Config : $CONFIG_FILE
+EOF
 }
 
 
@@ -1718,6 +1755,7 @@ wait_full(){
   wait_jobs_empty
   mark_full_completed
   ok "Full sync marked completed: $(state_file)"
+  prompt_sample_verify
 }
 
 incremental_sync(){
@@ -1808,15 +1846,164 @@ cutover_check(){
   return "$failed"
 }
 
-verify_sample(){
-  cat <<EOF
-verify-sample is not implemented yet.
+disk_size_bytes(){
+  local path="$1"
+  if [[ -b "$path" ]]; then
+    blockdev --getsize64 "$path"
+  elif [[ -f "$path" ]]; then
+    stat -c '%s' "$path"
+  else
+    return 1
+  fi
+}
 
-A safe implementation should compare read-only samples from SRC_DISK and the
-NBD export without writing to either side. This placeholder is intentional to
-avoid adding risky disk sampling logic without production testing.
+random_u64(){
+  od -An -N8 -tu8 /dev/urandom 2>/dev/null | awk '{print $1}'
+}
+
+verify_hash_local(){
+  local disk="$1" skip_mb="$2" chunk_mb="$3"
+  set +e
+  local h rc
+  h="$(dd if="$disk" bs=1M skip="$skip_mb" count="$chunk_mb" iflag=fullblock status=none 2>/tmp/vmigrate-verify-local.err | md5sum | awk '{print $1}')"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 0 && -n "$h" ]] || return 1
+  printf '%s\n' "$h"
+}
+
+verify_hash_remote(){
+  local disk="$1" skip_mb="$2" chunk_mb="$3" cmd h rc
+  cmd="dd if='$disk' bs=1M skip=$skip_mb count=$chunk_mb iflag=fullblock status=none 2>/tmp/vmigrate-verify-remote.err | md5sum | awk '{print \$1}'"
+  set +e
+  h="$(remote_ssh "$cmd" | tail -n1)"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 0 && -n "$h" ]] || return 1
+  printf '%s\n' "$h"
+}
+
+sample_verify(){
+  load_config
+  need dd
+  need md5sum
+  need ssh
+
+  local samples="${1:-64}" chunk_mb="${VMIGRATE_VERIFY_CHUNK_MB:-4}" chunk_bytes
+  local src_size target_size usable_size max_start_mb i rnd skip_mb src_hash target_hash
+  local failed=0 compared_bytes elapsed start_ts end_ts target_cmd
+
+  [[ "$samples" =~ ^[0-9]+$ && "$samples" -gt 0 ]] || die "Samples must be a positive number"
+  [[ "$chunk_mb" =~ ^[0-9]+$ && "$chunk_mb" -gt 0 ]] || die "Chunk size must be a positive number"
+
+  [[ -n "${SRC_DISK:-}" ]] || die "SRC_DISK is empty. Run discover first."
+  [[ -e "$SRC_DISK" ]] || die "Source disk not found: $SRC_DISK"
+  [[ -n "${TARGET_DISK:-}" ]] || die "TARGET_DISK is empty. Apply handoff/remote-prepare first."
+
+  if [[ -z "${RUN_DIR:-}" && "${CONFIG_FILE##*/}" == "config" ]]; then
+    RUN_DIR="$(config_dir)"
+  fi
+
+  chunk_bytes=$(( chunk_mb * 1024 * 1024 ))
+  src_size="$(disk_size_bytes "$SRC_DISK")" || die "Could not read source disk size: $SRC_DISK"
+
+  target_size="$(remote_ssh "blockdev --getsize64 '$TARGET_DISK' 2>/dev/null || stat -c '%s' '$TARGET_DISK' 2>/dev/null" | tail -n1)" || die "Could not read target disk size: $TARGET_DISK"
+  [[ "$target_size" =~ ^[0-9]+$ ]] || die "Invalid target disk size returned: $target_size"
+
+  usable_size="$src_size"
+  if [[ "$target_size" -lt "$usable_size" ]]; then
+    usable_size="$target_size"
+    warn "Target disk is smaller than source; verifying common size only."
+  fi
+
+  [[ "$usable_size" -gt "$chunk_bytes" ]] || die "Disk is smaller than verify chunk size"
+
+  max_start_mb=$(( (usable_size - chunk_bytes) / 1024 / 1024 ))
+  [[ "$max_start_mb" -lt 0 ]] && max_start_mb=0
+  compared_bytes=$(( samples * chunk_bytes ))
+
+  cat <<EOF
+Sample verify
+-------------
+Source     : $SRC_DISK
+Target     : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_DISK}
+Samples    : $samples
+Chunk size : ${chunk_mb} MiB
+Total read : $(format_bytes "$compared_bytes")
 EOF
+
+  start_ts="$(date +%s)"
+
+  for ((i=1; i<=samples; i++)); do
+    rnd=$(( (RANDOM << 15) | RANDOM ))
+    [[ "$rnd" -lt 0 ]] && rnd=$(( -rnd ))
+    skip_mb=$(( rnd % (max_start_mb + 1) ))
+
+    if ! src_hash="$(verify_hash_local "$SRC_DISK" "$skip_mb" "$chunk_mb")"; then
+      echo
+      warn "Could not read source sample $i/$samples at offset ${skip_mb}MiB"
+      [[ -s /tmp/vmigrate-verify-local.err ]] && cat /tmp/vmigrate-verify-local.err
+      failed=1
+      break
+    fi
+
+    if ! target_hash="$(verify_hash_remote "$TARGET_DISK" "$skip_mb" "$chunk_mb")"; then
+      echo
+      warn "Could not read target sample $i/$samples at offset ${skip_mb}MiB"
+      warn "Check SSH access and target disk path."
+      failed=1
+      break
+    fi
+
+    if [[ -z "$src_hash" || -z "$target_hash" || "$src_hash" != "$target_hash" ]]; then
+      echo
+      warn "Verify mismatch at sample $i/$samples"
+      echo "Offset MiB : $skip_mb"
+      echo "Source MD5 : ${src_hash:-empty}"
+      echo "Target MD5 : ${target_hash:-empty}"
+      failed=1
+      summary_set VERIFY "FAIL"
+      summary_set VERIFY_OFFSET_MIB "$skip_mb"
+      summary_set VERIFY_SAMPLES "$samples"
+      summary_set VERIFY_CHUNK_MB "$chunk_mb"
+      break
+    fi
+
+    printf '\r[%d/%d] verified offset=%sMiB' "$i" "$samples" "$skip_mb"
+  done
+
+  echo
+  end_ts="$(date +%s)"
+  elapsed=$(( end_ts - start_ts ))
+
+  summary_set VERIFY_SAMPLES "$samples"
+  summary_set VERIFY_CHUNK_MB "$chunk_mb"
+  summary_set VERIFY_COMPARED_BYTES "$compared_bytes"
+  summary_set VERIFY_ELAPSED_SECONDS "$elapsed"
+
+  if [[ "$failed" -eq 0 ]]; then
+    summary_set VERIFY "PASS"
+    ok "Sample verify PASSED"
+    echo "Compared : $(format_bytes "$compared_bytes")"
+    echo "Elapsed  : $(format_duration "$elapsed")"
+    return 0
+  fi
+
+  warn "Sample verify FAILED"
+  echo "Compared before fail: up to $(format_bytes "$(( i * chunk_bytes ))")"
+  echo "Elapsed             : $(format_duration "$elapsed")"
   return 1
+}
+
+prompt_sample_verify(){
+  [[ "${IN_BATCH_WORKFLOW:-0}" == "1" ]] && return 0
+
+  if ask_yes_default "Run sample verify now?"; then
+    sample_verify
+  else
+    summary_set VERIFY "SKIPPED"
+    warn "Sample verify skipped"
+  fi
 }
 
 watch_jobs(){
@@ -1909,6 +2096,7 @@ final_cutover_run(){
   state_write FINAL_COMPLETED 1
   state_write FINAL_COMPLETED_AT "$(now_ts)"
   ok "Final incremental completed"
+  prompt_sample_verify
 }
 
 final_cutover(){
@@ -2226,6 +2414,7 @@ batch_prepare_full_one(){
   case "$ssh_port" in *[!0-9]*|'') die "SSH port must be numeric: $ssh_port" ;; esac
 
   IN_CREATE_WORKFLOW=1
+  IN_BATCH_WORKFLOW=1
   start_log "$vm"
 
   CONFIG_FILE="${RUN_DIR}/config"
@@ -2563,6 +2752,7 @@ EOF
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
+  version) version_cmd ;;
   init) init_config ;;
   discover) discover "$@" ;;
   show) show_config ;;
@@ -2607,7 +2797,8 @@ case "$cmd" in
   watch) watch_jobs ;;
   status) status ;;
   report) report ;;
-  verify-sample) verify_sample ;;
+  verify) sample_verify "${1:-64}" ;;
+  verify-sample) sample_verify "${1:-64}" ;;
   cleanup) cleanup ;;
   stop-source) stop_source ;;
   -h|--help|help|"") usage ;;
