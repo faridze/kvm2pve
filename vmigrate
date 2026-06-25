@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.10"
+VERSION="0.4.11"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2318,16 +2318,16 @@ batch_full(){
     echo "--------------------------------"
 
     RUN_ID="${batch_id}-${idx}"
+    run_dir="${VMIGRATE_RUNS_DIR:-${SCRIPT_DIR}/migrations}/$(sanitize_name "$vm")/${RUN_ID}"
+
     set +e
-    (
-      RUN_ID="$RUN_ID"
-      VMIGRATE_LOG="${VMIGRATE_LOG:-1}"
-      batch_prepare_full_one "$vm" "$target_id" "$target_host" "$ssh_port" "$ssh_user" "$batch_id"
-    )
+    RUN_ID="$RUN_ID" VMIGRATE_LOG="${VMIGRATE_LOG:-1}" bash -c '
+      set -e
+      source ./vmigrate >/dev/null 2>&1 || true
+      batch_prepare_full_one "$@"
+    ' _ "$vm" "$target_id" "$target_host" "$ssh_port" "$ssh_user" "$batch_id"
     rc=$?
     set -e
-
-    run_dir="${VMIGRATE_RUNS_DIR:-${SCRIPT_DIR}/migrations}/$(sanitize_name "$vm")/${RUN_ID}"
 
     if [[ "$rc" -eq 0 ]]; then
       ok "Batch item completed: $vm"
@@ -2337,6 +2337,7 @@ batch_full(){
       warn "Batch item failed: $vm"
       batch_write_line "$batch_dir" "$vm $RUN_ID FAILED rc=$rc $run_dir"
       fail_count=$((fail_count + 1))
+      continue
     fi
   done < "$file"
 
