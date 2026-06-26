@@ -3293,7 +3293,7 @@ case "$cmd" in
   verify) sample_verify "${1:-64}" ;;
   verify-sample) sample_verify "${1:-64}" ;;
   cleanup) cleanup ;;
-  cleanup-stale) cleanup_stale ;;
+  cleanup-stale) cleanup_stale "$@" ;;
   lock-status) lock_status ;;
   unlock-stale) unlock_stale_cmd ;;
   stop-source) stop_source ;;
