@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.36"
+VERSION="0.4.37"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -2937,7 +2937,7 @@ EOF
   remote_dst_close || warn "Remote NBD close failed or no export was found."
 
   set +e
-  jobs_dismiss_all
+  ( jobs_dismiss_all )
   local dismiss_rc=$?
   set -e
   [[ "$dismiss_rc" -eq 0 ]] || warn "QMP job dismiss failed or timed out; continuing cleanup."
