@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.34"
+VERSION="0.4.35"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -104,7 +104,7 @@ Usage:
   ./vmigrate verify [SAMPLES]
   ./vmigrate verify-sample [SAMPLES]
   ./vmigrate cleanup
-  ./vmigrate cleanup-stale
+  ./vmigrate cleanup-stale [--force]
   ./vmigrate lock-status
   ./vmigrate unlock-stale
   ./vmigrate stop-source
@@ -2824,26 +2824,123 @@ Active  : $active
 EOF
 }
 
+shell_quote(){
+  local s="$1"
+  printf "'%s'" "$(printf '%s' "$s" | sed "s/'/'\\\\''/g")"
+}
+
+force_tunnel_stop(){
+  local pids
+  pids="$(migration_active_tunnels 2>/dev/null | awk '{print $1}' | sort -u || true)"
+  if [[ -z "$pids" ]]; then
+    warn "No matching tunnel process found for force kill."
+    return 0
+  fi
+
+  warn "Force killing local tunnel PID(s): $pids"
+  kill $pids 2>/dev/null || true
+  sleep 1
+
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      warn "Force killing stubborn tunnel PID: $pid"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+remote_force_kill_qemu_nbd(){
+  load_config
+
+  local qdisk qexport cmd
+  qdisk="$(shell_quote "$TARGET_DISK")"
+  qexport="$(shell_quote "$NBD_EXPORT")"
+
+  cmd="pids=\$(ps -eo pid=,args= | grep '[q]emu-nbd' | grep -F -- $qdisk | awk '{print \$1}' | sort -u); \
+if [ -z \"\$pids\" ]; then \
+  pids=\$(ps -eo pid=,args= | grep '[q]emu-nbd' | grep -F -- $qexport | awk '{print \$1}' | sort -u); \
+fi; \
+if [ -z \"\$pids\" ]; then \
+  echo 'No matching remote qemu-nbd process found'; exit 0; \
+fi; \
+echo \"Force killing remote qemu-nbd PID(s): \$pids\"; \
+kill \$pids 2>/dev/null || true; \
+sleep 1; \
+for p in \$pids; do \
+  if kill -0 \$p 2>/dev/null; then \
+    kill -KILL \$p 2>/dev/null || true; \
+  fi; \
+done"
+
+  remote_ssh "$cmd"
+}
+
 cleanup_stale(){
   load_config
+
+  local force=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force=1 ;;
+      -h|--help)
+        cat <<EOF
+Usage:
+  ./vmigrate cleanup-stale
+  ./vmigrate cleanup-stale --force
+
+Safe mode:
+  - stop matching local tunnel
+  - close remote export through vmigrate-agent
+  - dismiss concluded QMP jobs
+  - remove stale lock only if PID is dead
+
+Force mode:
+  - everything in safe mode
+  - force kill matching local tunnel PID(s)
+  - force kill remote qemu-nbd matching TARGET_DISK or NBD_EXPORT
+
+Force mode requires typing FORCE.
+EOF
+        return 0
+        ;;
+      *)
+        die "Unknown cleanup-stale option: $arg"
+        ;;
+    esac
+  done
+
   echo "cleanup-stale"
   echo "-------------"
   echo "VM        : $VM_NAME"
   echo "Target    : ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}"
   echo "NBD       : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}"
+  echo "Target disk: $TARGET_DISK"
   echo "Run config: $CONFIG_FILE"
   echo
-  echo "This only attempts safe cleanup for the active/current config:"
-  echo "- stop local SSH/autossh tunnel for this NBD port/target"
-  echo "- close remote destination NBD export through vmigrate-agent"
-  echo "- dismiss concluded QMP block jobs"
-  echo "- remove stale local lock for this VM if PID is dead"
-  echo
-  ask_exact "Continue cleanup-stale? Type CLEAN:" "CLEAN" || die "Aborted"
+
+  if [[ "$force" -eq 1 ]]; then
+    warn "FORCE mode enabled."
+    warn "This will kill matching local tunnel processes and remote qemu-nbd processes."
+    echo
+    ask_exact "Continue cleanup-stale --force? Type FORCE:" "FORCE" || die "Aborted"
+  else
+    echo "This only attempts safe cleanup for the active/current config:"
+    echo "- stop local SSH/autossh tunnel for this NBD port/target"
+    echo "- close remote destination NBD export through vmigrate-agent"
+    echo "- dismiss concluded QMP block jobs"
+    echo "- remove stale local lock for this VM if PID is dead"
+    echo
+    ask_exact "Continue cleanup-stale? Type CLEAN:" "CLEAN" || die "Aborted"
+  fi
 
   tunnel_stop || warn "Local tunnel stop failed or no matching tunnel was found."
   remote_dst_close || warn "Remote NBD close failed or no export was found."
   jobs_dismiss_all || warn "QMP job dismiss failed or no concluded jobs were found."
+
+  if [[ "$force" -eq 1 ]]; then
+    force_tunnel_stop || warn "Force tunnel cleanup failed"
+    remote_force_kill_qemu_nbd || warn "Force remote qemu-nbd cleanup failed"
+  fi
 
   local lock
   lock="$(lock_path_for_vm "$VM_NAME")"
