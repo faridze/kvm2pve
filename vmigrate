@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.28"
+VERSION="0.4.29"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -57,7 +57,7 @@ Usage:
   ./vmigrate init
   ./vmigrate show
   ./vmigrate list
-  ./vmigrate history
+  ./vmigrate history [VM_NAME] [--latest] [--failed]
   ./vmigrate active
   ./vmigrate use VM_NAME RUN_ID
   ./vmigrate use RUN_DIR
@@ -2765,7 +2765,118 @@ cleanup_stale(){
 }
 
 history_cmd(){
-  runs_list
+  local filter_vm="" mode="all" arg base found=0 shown=0
+
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    case "$arg" in
+      --latest) mode="latest" ;;
+      --failed) mode="failed" ;;
+      -h|--help)
+        cat <<EOF
+Usage:
+  ./vmigrate history
+  ./vmigrate history VM_NAME
+  ./vmigrate history --latest
+  ./vmigrate history --failed
+
+Columns:
+  VM, RUN_ID, STATUS, FULL, FINAL, VERIFY, REL_DIR
+EOF
+        return 0
+        ;;
+      *)
+        filter_vm="$arg"
+        ;;
+    esac
+    shift
+  done
+
+  base="$(runs_base_dir)"
+
+  printf '%-18s %-20s %-15s %-5s %-5s %-8s %s\n' "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "VERIFY" "REL_DIR"
+
+  shopt -s nullglob
+
+  if [[ "$mode" == "latest" ]]; then
+    local vmdir dir vm run cfg cfg_vm status full final verify rel_dir state safe_vm
+    for vmdir in "$base"/*; do
+      [[ -d "$vmdir" ]] || continue
+      [[ "${vmdir##*/}" == "batches" ]] && continue
+
+      vm="${vmdir##*/}"
+      [[ -n "$filter_vm" && "$vm" != "$(sanitize_name "$filter_vm")" && "$vm" != "$filter_vm" ]] && continue
+
+      dir="$(ls -1d "$vmdir"/* 2>/dev/null | sort | tail -n1)"
+      [[ -n "$dir" && -d "$dir" ]] || continue
+
+      run="${dir##*/}"
+      cfg="$dir/config"
+      if [[ -f "$cfg" ]]; then
+        cfg_vm="$(run_config_value "$cfg" VM_NAME)"
+        [[ -n "$cfg_vm" ]] && vm="$cfg_vm"
+      fi
+
+      status="$(run_status_for_dir "$dir")"
+      full="no"; final="no"
+      safe_vm="$(sanitize_name "$vm")"
+      state="$dir/.vmigrate-state-$safe_vm"
+      [[ "$(state_get_from_file "$state" FULL_COMPLETED)" == "1" ]] && full="yes"
+      [[ "$(state_get_from_file "$state" FINAL_COMPLETED)" == "1" ]] && final="yes"
+
+      verify="NOT_RUN"
+      [[ -f "$dir/summary.txt" ]] && verify="$(awk -F= '$1=="VERIFY"{print $2; exit}' "$dir/summary.txt")"
+      [[ -n "$verify" ]] || verify="NOT_RUN"
+
+      rel_dir="migrations/${dir#"$base"/}"
+      printf '%-18s %-20s %-15s %-5s %-5s %-8s %s\n' "$vm" "$run" "$status" "$full" "$final" "$verify" "$rel_dir"
+      shown=$((shown+1))
+    done
+    shopt -u nullglob
+    (( shown )) || warn "No matching migration runs found."
+    return 0
+  fi
+
+  local dir vm run cfg cfg_vm status full final verify rel_dir state safe_vm
+  for dir in "$base"/*/*; do
+    [[ -d "$dir" ]] || continue
+    case "$dir" in "$base"/batches/*) continue ;; esac
+    found=1
+
+    vm="${dir%/*}"
+    vm="${vm##*/}"
+    run="${dir##*/}"
+    cfg="$dir/config"
+
+    if [[ -f "$cfg" ]]; then
+      cfg_vm="$(run_config_value "$cfg" VM_NAME)"
+      [[ -n "$cfg_vm" ]] && vm="$cfg_vm"
+    fi
+
+    [[ -n "$filter_vm" && "$vm" != "$filter_vm" && "$(sanitize_name "$vm")" != "$(sanitize_name "$filter_vm")" ]] && continue
+
+    status="$(run_status_for_dir "$dir")"
+    full="no"; final="no"
+    safe_vm="$(sanitize_name "$vm")"
+    state="$dir/.vmigrate-state-$safe_vm"
+    [[ "$(state_get_from_file "$state" FULL_COMPLETED)" == "1" ]] && full="yes"
+    [[ "$(state_get_from_file "$state" FINAL_COMPLETED)" == "1" ]] && final="yes"
+
+    verify="NOT_RUN"
+    [[ -f "$dir/summary.txt" ]] && verify="$(awk -F= '$1=="VERIFY"{print $2; exit}' "$dir/summary.txt")"
+    [[ -n "$verify" ]] || verify="NOT_RUN"
+
+    if [[ "$mode" == "failed" ]]; then
+      [[ "$status" == *failed* || "$verify" == "FAIL" ]] || continue
+    fi
+
+    rel_dir="migrations/${dir#"$base"/}"
+    printf '%-18s %-20s %-15s %-5s %-5s %-8s %s\n' "$vm" "$run" "$status" "$full" "$final" "$verify" "$rel_dir"
+    shown=$((shown+1))
+  done
+
+  shopt -u nullglob
+  (( shown )) || warn "No matching migration runs found."
 }
 
 create_workflow(){
@@ -2943,7 +3054,7 @@ case "$cmd" in
   discover) discover "$@" ;;
   show) show_config ;;
   list) runs_list ;;
-  history) history_cmd ;;
+  history) history_cmd "$@" ;;
   active) run_active ;;
   use) run_use "${1:-}" "${2:-}" ;;
   env) run_env "${1:-}" "${2:-}" ;;
