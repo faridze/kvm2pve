@@ -765,9 +765,10 @@ quick_start(){
 }
 
 remote_dir(){
-  load_config
-  if [[ -n "${REMOTE_RUN_DIR:-}" ]]; then
-    printf '%s\n' "$REMOTE_RUN_DIR"
+  local rdir
+  rdir="$(get_conf REMOTE_RUN_DIR)"
+  if [[ -n "$rdir" ]]; then
+    printf '%s\n' "$rdir"
   else
     printf '%s\n' "/root/vmigrate"
   fi
