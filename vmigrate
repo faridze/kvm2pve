@@ -1490,7 +1490,9 @@ start_tunnel(){
   if [[ "$TUNNEL_MODE" == "direct" ]]; then warn "Direct mode selected; no SSH tunnel started"; return; fi
   if tunnel_listener_exists; then
     if tunnel_health_ok >/dev/null 2>&1; then
-      ok "Existing tunnel listener is healthy; reusing 127.0.0.1:${NBD_PORT}"
+      ok "SSH tunnel already active and healthy for this run: 127.0.0.1:${NBD_PORT}"
+      echo "Remote run dir : $(remote_dir)"
+      echo "NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}"
       return 0
     fi
     die "A stale or unhealthy tunnel listener already exists on 127.0.0.1:${NBD_PORT}. Run: ./vmigrate tunnel-restart"
