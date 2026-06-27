@@ -2403,10 +2403,16 @@ EOF
       die "Aborted"
     fi
     if [[ -n "$tunnels" ]]; then
-      if [[ -f "$CONFIG_FILE" ]]; then
+      if [[ -f "$CONFIG_FILE" && -n "$(get_conf TARGET_DISK)" ]]; then
         tunnel_stop || warn "No local tunnel stopped or tunnel-stop failed."
       else
-        warn "Config is missing, so local tunnel cleanup was not attempted: $CONFIG_FILE"
+        warn "Config is missing or incomplete, stopping detected local tunnel PID(s) directly."
+        printf '%s\n' "$tunnels" | awk '{print $1}' | while read -r pid; do
+          case "$pid" in
+            ''|*[!0-9]*) continue ;;
+          esac
+          kill "$pid" 2>/dev/null || true
+        done
       fi
     fi
     if [[ -n "$jobs" ]]; then
