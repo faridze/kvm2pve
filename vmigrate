@@ -1495,7 +1495,20 @@ start_tunnel(){
       echo "NBD            : 127.0.0.1:${NBD_PORT}, export=${NBD_EXPORT}"
       return 0
     fi
-    die "A stale or unhealthy tunnel listener already exists on 127.0.0.1:${NBD_PORT}. Run: ./vmigrate tunnel-restart"
+    cat >&2 <<EOF
+${RED}ERROR${NC} Tunnel listener exists on 127.0.0.1:${NBD_PORT}, but NBD health check failed.
+
+This usually means the local SSH tunnel process exists, but the remote NBD export is closed or not responding.
+
+Try:
+  ./vmigrate remote-export
+  ./vmigrate tunnel-check
+
+If still failing:
+  ./vmigrate tunnel-restart
+  ./vmigrate tunnel-check
+EOF
+    exit 1
   fi
   if [[ "$TUNNEL_MODE" == "autossh" ]]; then need autossh; fi
   local args=(-f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -L "${NBD_PORT}:127.0.0.1:${NBD_PORT}" -p "$TARGET_SSH_PORT" "${TARGET_SSH_USER}@${TARGET_HOST}")
