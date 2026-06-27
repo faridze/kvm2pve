@@ -306,7 +306,7 @@ runs_list(){
   base="$(runs_base_dir)"
   active="$(active_run_dir 2>/dev/null || true)"
 
-  printf '%-6s %-18s %-20s %-15s %-5s %-5s %-8s %s\n' "ACTIVE" "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "VERIFY" "REL_DIR"
+  printf '%-6s %-18s %-20s %-15s %-5s %-5s %-8s %-24s %s\n' "ACTIVE" "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "VERIFY" "REMOTE" "REL_DIR"
 
   shopt -s nullglob
   for dir in "$base"/*/*; do
@@ -341,7 +341,10 @@ runs_list(){
     verify="unset"
     [[ -f "$dir/summary.txt" ]] && verify="$(awk -F= '$1=="VERIFY"{print $2; exit}' "$dir/summary.txt")"
     [[ -n "$verify" ]] || verify="unset"
-    printf '%-6s %-18s %-20s %-15s %-5s %-5s %-8s %s\n' "$mark" "$vm" "$run" "$status" "$full" "$final" "$verify" "$rel_dir"
+    remote="$(run_config_value "$cfg" REMOTE_RUN_DIR)"
+    remote="${remote##*/}"
+    [[ -n "$remote" ]] || remote="-"
+    printf '%-6s %-18s %-20s %-15s %-5s %-5s %-8s %-24s %s\n' "$mark" "$vm" "$run" "$status" "$full" "$final" "$verify" "$remote" "$rel_dir"
   done
   shopt -u nullglob
 
@@ -3036,7 +3039,7 @@ Aliases:
   latest, all, failed
 
 Columns:
-  VM, RUN_ID, STATUS, FULL, FINAL, VERIFY, REL_DIR
+  VM, RUN_ID, STATUS, FULL, FINAL, VERIFY, REMOTE, REL_DIR
 EOF
         return 0
         ;;
@@ -3049,7 +3052,7 @@ EOF
 
   base="$(runs_base_dir)"
 
-  printf '%-18s %-20s %-15s %-5s %-5s %-8s %s\n' "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "VERIFY" "REL_DIR"
+  printf '%-18s %-20s %-15s %-5s %-5s %-8s %-24s %s\n' "VM" "RUN_ID" "STATUS" "FULL" "FINAL" "VERIFY" "REMOTE" "REL_DIR"
 
   shopt -s nullglob
 
@@ -3084,7 +3087,10 @@ EOF
       [[ -n "$verify" ]] || verify="NOT_RUN"
 
       rel_dir="migrations/${dir#"$base"/}"
-      printf '%-18s %-20s %-15s %-5s %-5s %-8s %s\n' "$vm" "$run" "$status" "$full" "$final" "$verify" "$rel_dir"
+      remote="$(run_config_value "$cfg" REMOTE_RUN_DIR)"
+      remote="${remote##*/}"
+      [[ -n "$remote" ]] || remote="-"
+      printf '%-18s %-20s %-15s %-5s %-5s %-8s %-24s %s\n' "$vm" "$run" "$status" "$full" "$final" "$verify" "$remote" "$rel_dir"
       shown=$((shown+1))
     done
     shopt -u nullglob
@@ -3126,7 +3132,10 @@ EOF
     fi
 
     rel_dir="migrations/${dir#"$base"/}"
-    printf '%-18s %-20s %-15s %-5s %-5s %-8s %s\n' "$vm" "$run" "$status" "$full" "$final" "$verify" "$rel_dir"
+    remote="$(run_config_value "$cfg" REMOTE_RUN_DIR)"
+    remote="${remote##*/}"
+    [[ -n "$remote" ]] || remote="-"
+    printf '%-18s %-20s %-15s %-5s %-5s %-8s %-24s %s\n' "$vm" "$run" "$status" "$full" "$final" "$verify" "$remote" "$rel_dir"
     shown=$((shown+1))
   done
 
