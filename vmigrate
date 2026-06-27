@@ -872,6 +872,14 @@ remote_prepare(){
   [[ "$token" == "$prefix"* ]] || die "Remote handoff token is invalid"
 
   apply_handoff "$token"
+
+  if [[ "${VMIGRATE_AUTO_NBD_PORT:-1}" == "1" ]]; then
+    info "Selecting automatic per-run NBD port"
+    set_nbd_port auto
+  else
+    warn "Automatic NBD port selection disabled by VMIGRATE_AUTO_NBD_PORT=0"
+  fi
+
   info "Running source discovery and writing SRC_DISK/QEMU_DEVICE/QEMU_NODE when unambiguous"
   discover "$VM_NAME" --yes
   # shellcheck disable=SC1090
