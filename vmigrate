@@ -990,17 +990,47 @@ remote_dst_close(){
   remote_ssh "cd '$(remote_dir)' && ./vmigrate-agent close"
 }
 
+remote_port_is_free(){
+  local port="$1" hit
+  hit="$(remote_ssh "ss -lnt 2>/dev/null | awk '{print \\$4}' | grep -E '(^|:)${port}$' || true")" || true
+  [[ -z "$hit" ]]
+}
+
+pick_auto_nbd_port(){
+  local base port i
+  base=$((10000 + (TARGET_ID % 50000)))
+  (( base < 1024 )) && base=10809
+  (( base > 65000 )) && base=$((10809 + (TARGET_ID % 1000)))
+
+  for i in $(seq 0 100); do
+    port=$((base + i))
+    (( port > 65535 )) && break
+    if remote_port_is_free "$port"; then
+      printf '%s\n' "$port"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 set_nbd_port(){
-  local port="${1:-}"
-  [[ -n "$port" ]] || die "Usage: ./vmigrate set-nbd-port PORT"
-  case "$port" in *[!0-9]*|'') die "NBD port must be numeric" ;; esac
-  (( port >= 1024 && port <= 65535 )) || die "NBD port must be between 1024 and 65535"
+  local port="${1:-}" rdir old_port
+  [[ -n "$port" ]] || die "Usage: ./vmigrate set-nbd-port PORT|auto"
 
   load_config
   need ssh
 
-  local rdir
+  old_port="$NBD_PORT"
   rdir="$(remote_dir)"
+
+  if [[ "$port" == "auto" ]]; then
+    info "Selecting free per-run NBD port based on TARGET_ID=$TARGET_ID"
+    port="$(pick_auto_nbd_port)" || die "Could not find a free NBD port automatically"
+  else
+    case "$port" in *[!0-9]*|'') die "NBD port must be numeric or auto" ;; esac
+    (( port >= 1024 && port <= 65535 )) || die "NBD port must be between 1024 and 65535"
+  fi
 
   echo "Set per-run NBD port"
   echo "--------------------"
@@ -1008,6 +1038,12 @@ set_nbd_port(){
   echo
   warn "This changes only the active run config and its remote per-run vmigrate.env."
   warn "It does not enable parallel migration automatically."
+
+  if [[ "$old_port" != "$port" ]]; then
+    if ! remote_port_is_free "$port"; then
+      die "Selected NBD port is already listening on destination: $port"
+    fi
+  fi
 
   write_key NBD_PORT "$port"
   NBD_PORT="$port"
