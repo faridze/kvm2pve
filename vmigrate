@@ -2,7 +2,7 @@
 # vmigrate source-side helper
 set -Eeuo pipefail
 
-VERSION="0.4.38"
+VERSION="1.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG_FILE="${SCRIPT_DIR}/vmigrate.env"
 ACTIVE_FILE="${SCRIPT_DIR}/.vmigrate-active"
@@ -764,7 +764,14 @@ quick_start(){
   next_steps
 }
 
-remote_dir(){ printf '/root/vmigrate'; }
+remote_dir(){
+  load_config
+  if [[ -n "${REMOTE_RUN_DIR:-}" ]]; then
+    printf '%s\n' "$REMOTE_RUN_DIR"
+  else
+    printf '%s\n' "/root/vmigrate"
+  fi
+}
 remote_ssh(){
   ssh -p "$TARGET_SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 "$TARGET_SSH_USER@$TARGET_HOST" "$@"
 }
@@ -821,6 +828,9 @@ remote_prepare(){
   write_key TARGET_SSH_USER "$ssh_user"
   write_key TARGET_SSH_PORT "$ssh_port"
   write_key TARGET_ID "$target_id"
+  if [[ -z "$(get_conf REMOTE_RUN_DIR)" ]]; then
+    write_key REMOTE_RUN_DIR "/root/vmigrate/runs/$(sanitize_name "$vm")-${RUN_ID:-$(date '+%Y%m%d-%H%M%S')}"
+  fi
   [[ -n "$(get_conf BITMAP)" ]] || write_key BITMAP "$(default_bitmap "$vm")"
   [[ -n "$(get_conf TARGET_NODE)" ]] || write_key TARGET_NODE "$(default_target_node "$vm")"
   [[ -n "$(get_conf NBD_PORT)" ]] || write_key NBD_PORT 10809
