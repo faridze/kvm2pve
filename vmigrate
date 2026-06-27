@@ -924,13 +924,15 @@ remote_export(){
 
     if [[ "$did_cleanup" != "1" ]] && printf '%s\n' "$out" | grep -q "NBD port already in use"; then
       warn "Remote NBD export port appears to be already in use."
-      if ask_yes_default "Close remote NBD export, stop local tunnel, and retry remote-export?"; then
+      warn "NBD_PORT is still fixed at ${NBD_PORT}; parallel migrations to the same destination are not supported yet."
+      warn "Current remote run dir: $(remote_dir)"
+      if ask_yes_default "Close remote NBD export for this active run, stop local tunnel, and retry remote-export?"; then
         did_cleanup=1
         tunnel_stop || warn "Local tunnel stop failed or no tunnel was found."
         remote_dst_close || warn "Remote NBD close failed or no export was found."
         continue
       fi
-      die "Remote export failed because NBD port is already in use."
+      die "Remote export failed because NBD port ${NBD_PORT} is already in use. Do not run parallel migrations until per-run NBD port support is added."
     fi
 
     return "$rc"
