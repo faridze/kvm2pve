@@ -961,13 +961,15 @@ cleanup_remote_runs(){
   remote_context
   echo
   echo "Remote run directories:"
-  remote_ssh "sh -c 'if [ -d /root/vmigrate/runs ]; then find /root/vmigrate/runs -mindepth 1 -maxdepth 1 -type d -printf "%p\\n" | sort; else echo "No /root/vmigrate/runs directory"; fi'" | while IFS= read -r dir; do
-    if [[ "$dir" == "$REMOTE_RUN_DIR" ]]; then
+  while IFS= read -r dir; do
+    if [[ "$dir" == "No /root/vmigrate/runs directory" ]]; then
+      echo "$dir"
+    elif [[ "$dir" == "$REMOTE_RUN_DIR" ]]; then
       echo "KEEP   $dir"
     else
       echo "OLD    $dir"
     fi
-  done
+  done < <(remote_ssh "if [ -d /root/vmigrate/runs ]; then find /root/vmigrate/runs -mindepth 1 -maxdepth 1 -type d | sort; else echo 'No /root/vmigrate/runs directory'; fi")
 
   echo
   warn "Dry-run only. Nothing was deleted."
