@@ -113,8 +113,41 @@ Usage:
   ./vmigrate unlock-stale
   ./vmigrate stop-source
 
+Command summary:
+  version                         Show vmigrate version
+  create                          Guided end-to-end migration workflow
+  remote-prepare                  Prepare destination per-run workspace and handoff
+  remote-run-check                Compare local config with remote per-run env
+  resume                          Analyze active run and suggest next step
+  resume --run                    Run the next safe resume step automatically
+  set-nbd-port auto               Pick a free per-run NBD port
+  remote-export                   Start/reuse destination NBD export
+  remote-dst-status               Show destination VM/NBD status
+  remote-dst-close                Close destination NBD export
+  tunnel                          Start/reuse local SSH/autossh tunnel
+  tunnel-check                    Check NBD metadata through tunnel
+  bitmap                          Create source dirty bitmap
+  full                            Start full sync
+  wait-full                       Wait full sync completion
+  incremental                     Start optional pre-cutover incremental sync
+  wait-inc                        Wait incremental sync completion
+  cutover-check                   Validate final cutover readiness
+  final                           Suspend source and run final sync
+  verify                          Sample-verify source/destination data
+  stop-source                     Stop source VM after final completed
+  cleanup                         Normal cleanup for active run
+  batch-full                      Run FULL sync sequentially from batch file
+  list                            List migration runs
+  history                         Show latest/all/failed migration history
+  report                          Show active run report
+  watch                           Watch active block-job progress
+  jobs                            Show QEMU block jobs
+  cleanup-stale                   Safe stale cleanup helper
+  lock-status                     Show vmigrate locks
+  unlock-stale                    Remove stale locks
+
 Recommended first run:
-  ./vmigrate quick HANDOFF_TOKEN
+  ./vmigrate create VM_NAME TARGET_ID TARGET_HOST SSH_PORT root
 EOF
 }
 
