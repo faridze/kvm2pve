@@ -75,9 +75,6 @@ Usage:
   ./vmigrate remote-run-check
   ./vmigrate resume [--run]
   ./vmigrate set-nbd-port PORT
-  ./vmigrate quick [HANDOFF_TOKEN]
-  ./vmigrate quick [VM_NAME] [HANDOFF_TOKEN]
-  ./vmigrate next
   ./vmigrate doctor
   ./vmigrate tunnel
   ./vmigrate tunnel-stop
@@ -1008,153 +1005,6 @@ NBD_EXPORT=$handoff_nbd_export
 EOF
 }
 
-conf_present(){ [[ -n "$(get_conf "$1")" ]]; }
-conf_value(){ local val; val="$(get_conf "$1")"; printf '%s' "${val:-$2}"; }
-status_word(){ if "$@"; then printf 'yes'; else printf 'no'; fi; }
-
-prompt_source_vm(){
-  local current_vm vm
-  current_vm="$(conf_value VM_NAME kvm3023)"
-  ask vm "Source VM name" "$current_vm"
-  printf '%s' "$vm"
-}
-
-prompt_pve_connection(){
-  local target_host ssh_port
-
-  target_host="$(conf_value TARGET_HOST CHANGE_ME)"
-  ask target_host "Target host/IP" "$target_host"
-  write_key TARGET_HOST "$target_host"
-
-  ssh_port="$(conf_value TARGET_SSH_PORT 22)"
-  ask ssh_port "Target SSH port" "$ssh_port"
-  write_key TARGET_SSH_PORT "$ssh_port"
-
-  [[ -n "$(get_conf TARGET_SSH_USER)" ]] || write_key TARGET_SSH_USER root
-}
-
-source_discovered(){ conf_present SRC_DISK && conf_present QEMU_DEVICE && conf_present QEMU_NODE; }
-handoff_applied(){ conf_present TARGET_ID && conf_present TARGET_DISK && conf_present NBD_PORT && conf_present NBD_EXPORT; }
-target_host_set(){ local host; host="$(get_conf TARGET_HOST)"; [[ -n "$host" && "$host" != "CHANGE_ME" ]]; }
-
-next_steps(){
-  local vm target_host method effective full_started full_completed final_completed source_stopped bitmap_ok tunnel_ok
-
-  if [[ ! -f "$CONFIG_FILE" ]]; then
-    cat <<EOF
-Current state
--------------
-Config file    : missing
-
-Next (recommended):
-./vmigrate quick HANDOFF_TOKEN
-EOF
-    return 0
-  fi
-
-  vm="$(conf_value VM_NAME VM_NAME)"
-  target_host="$(conf_value TARGET_HOST CHANGE_ME)"
-  method="$(conf_value BACKUP_METHOD drive-backup)"
-  full_started="$(state_get FULL_STARTED)"; full_started="${full_started:-0}"
-  full_completed="$(state_get FULL_COMPLETED)"; full_completed="${full_completed:-0}"
-  final_completed="$(state_get FINAL_COMPLETED)"; final_completed="${final_completed:-0}"
-  source_stopped="$(state_get SOURCE_STOPPED)"; source_stopped="${source_stopped:-0}"
-
-  if source_discovered && handoff_applied && target_host_set; then
-    load_config
-    effective="$(effective_backup_method)"
-    if tunnel_health_ok >/dev/null 2>&1; then tunnel_ok="yes"; else tunnel_ok="no"; fi
-    if bitmap_exists >/dev/null 2>&1; then bitmap_ok="yes"; else bitmap_ok="no"; fi
-  else
-    effective="$method"
-    tunnel_ok="unknown"
-    bitmap_ok="unknown"
-  fi
-
-  cat <<EOF
-Current state
--------------
-Config file       : $CONFIG_FILE
-VM name           : $vm
-Backup method     : $method
-Effective method  : $effective
-Source discovered : $(status_word source_discovered)
-Handoff applied   : $(status_word handoff_applied)
-Target host set   : $(status_word target_host_set) ($target_host)
-Tunnel healthy    : $tunnel_ok
-Bitmap present    : $bitmap_ok
-FULL_STARTED      : $full_started
-FULL_COMPLETED    : $full_completed
-FINAL_COMPLETED   : $final_completed
-SOURCE_STOPPED    : $source_stopped
-
-Suggested next
---------------
-EOF
-
-  if ! conf_present VM_NAME; then
-    echo "./vmigrate discover VM_NAME"
-  elif ! source_discovered; then
-    echo "./vmigrate discover $vm"
-  elif ! handoff_applied; then
-    echo "./vmigrate apply-handoff HANDOFF_TOKEN"
-  elif ! target_host_set; then
-    echo "Set TARGET_HOST in $CONFIG_FILE, then run: ./vmigrate remote-prepare or ./vmigrate doctor"
-  elif [[ "$tunnel_ok" != "yes" ]]; then
-    echo "./vmigrate remote-export"
-    echo "./vmigrate tunnel"
-    echo "./vmigrate tunnel-check"
-  elif [[ "$bitmap_ok" != "yes" ]]; then
-    if [[ "$effective" == "blockdev-backup" ]]; then
-      echo "./vmigrate attach-target"
-      echo "./vmigrate check-target"
-    fi
-    echo "./vmigrate bitmap"
-    echo "./vmigrate check-bitmap"
-  elif [[ "$full_started" != "1" ]]; then
-    echo "./vmigrate full"
-  elif [[ "$full_completed" != "1" ]]; then
-    echo "./vmigrate wait-full"
-  elif [[ "$final_completed" != "1" ]]; then
-    echo "./vmigrate cutover-check"
-    echo "./vmigrate final"
-  elif [[ "$source_stopped" != "1" ]]; then
-    echo "./vmigrate stop-source"
-  else
-    echo "./vmigrate remote-dst-close"
-  fi
-}
-
-quick_start(){
-  local vm_arg="${1:-}" token="${2:-}"
-
-  if [[ "$vm_arg" == VMIGRATE_HANDOFF_V1:* && -z "$token" ]]; then
-    token="$vm_arg"
-    vm_arg=""
-  fi
-
-  if [[ -n "$token" ]]; then
-    apply_handoff "$token"
-    [[ -n "$vm_arg" ]] || vm_arg="$(prompt_source_vm)"
-    prompt_pve_connection
-    discover "$vm_arg"
-  else
-    warn "No handoff token supplied; run apply-handoff before doctor if destination values changed"
-    discover "$vm_arg"
-  fi
-
-  show_config
-
-  if confirm "Run source doctor now?"; then
-    preflight
-  else
-    warn "Preflight skipped"
-  fi
-
-  echo
-  next_steps
-}
-
 remote_dir(){
   local rdir
   rdir="$(get_conf REMOTE_RUN_DIR)"
@@ -1687,7 +1537,6 @@ block_jobs_query_ok_empty(){
   fi
   ! printf '%s\n' "$out" | grep -q '"type"'
 }
-block_job_ids_from_json(){ awk -F'"' '/"device"/ {print $4}'; }
 block_jobs_table_from_json(){
   awk -F'"' '
     /"device"/ {device=$4}
@@ -2129,10 +1978,6 @@ If still failing:
 EOF
 }
 
-nbd_read_sample_warning(){
-  warn "NBD metadata is reachable, but read sample failed/timed out."
-  warn "Continuing is possible, but if full hangs, restart tunnel/export."
-}
 
 tunnel_health_ok(){
   load_config
@@ -2607,9 +2452,6 @@ disk_size_bytes(){
   fi
 }
 
-random_u64(){
-  od -An -N8 -tu8 /dev/urandom 2>/dev/null | awk '{print $1}'
-}
 
 verify_hash_local(){
   local disk="$1" skip_mb="$2" chunk_mb="$3"
@@ -4031,8 +3873,6 @@ case "$cmd" in
   remote-run-check) remote_run_check ;;
   resume) resume_check "$@" ;;
   set-nbd-port) set_nbd_port "${1:-}" ;;
-  quick) quick_start "${1:-}" "${2:-}" ;;
-  next) next_steps ;;
   doctor) preflight ;;
   tunnel) start_tunnel ;;
   tunnel-stop) tunnel_stop ;;
