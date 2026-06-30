@@ -1682,6 +1682,39 @@ format_duration(){
   printf '%02d:%02d:%02d' "$h" "$m" "$s"
 }
 
+
+progress_layout(){
+  local cols="${1:-${COLUMNS:-120}}"
+
+  if command -v tput >/dev/null 2>&1 && [[ -t 1 ]]; then
+    cols="$(tput cols 2>/dev/null || echo "$cols")"
+  fi
+
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=120
+
+  if (( cols >= 140 )); then
+    printf 'full\n'
+    return
+  fi
+
+  if (( cols >= 110 )); then
+    printf 'compact\n'
+    return
+  fi
+
+  if (( cols >= 80 )); then
+    printf 'short\n'
+    return
+  fi
+
+  if (( cols >= 60 )); then
+    printf 'tiny\n'
+    return
+  fi
+
+  printf 'minimal\n'
+}
+
 progress_line(){
   local offset="${1:-0}" len="${2:-0}" status="${3:-running}" width=30
   local pct filled empty bar now elapsed delta speed remaining eta
@@ -1737,8 +1770,54 @@ progress_line(){
     eta_h="n/a"
   fi
 
-  bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
-  printf '[%s] %d%% | %s | %s / %s | %s | elapsed %s | eta %s' "$bar" "$pct" "$status" "$offset_h" "$len_h" "$speed_h" "$elapsed_h" "$eta_h"
+  cols="${COLUMNS:-120}"
+  layout="$(progress_layout)"
+
+  case "$layout" in
+    full)    width=30 ;;
+    compact) width=20 ;;
+    short)   width=10 ;;
+    *)        width=0 ;;
+  esac
+
+  if (( width > 0 )); then
+    filled=$(( pct * width / 100 ))
+    empty=$(( width - filled ))
+    bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
+  fi
+
+  case "$layout" in
+
+    full)
+      if [[ "$status" == "running" ]]; then
+        printf '[%s] %d%% | %s / %s | %s | elapsed %s | ETA %s' \
+          "$bar" "$pct" "$offset_h" "$len_h" "$speed_h" "$elapsed_h" "$eta_h"
+      else
+        printf '[%s] %d%% | %s | %s / %s | %s | elapsed %s | ETA %s' \
+          "$bar" "$pct" "$status" "$offset_h" "$len_h" "$speed_h" "$elapsed_h" "$eta_h"
+      fi
+      ;;
+
+    compact)
+      printf '[%s] %d%% | %s/%s | %s | ETA %s' \
+        "$bar" "$pct" "$offset_h" "$len_h" "$speed_h" "$eta_h"
+      ;;
+
+    short)
+      printf '[%s] %d%% | %s/%s' \
+        "$bar" "$pct" "$offset_h" "$len_h"
+      ;;
+
+    tiny)
+      printf '%d%% | %s/%s' \
+        "$pct" "$offset_h" "$len_h"
+      ;;
+
+    *)
+      printf '%d%%' "$pct"
+      ;;
+
+  esac
 }
 
 progress_from_jobs_json(){
