@@ -1538,14 +1538,73 @@ qmp(){ local json="$1"; timeout "${QMP_TIMEOUT:-20}" virsh qemu-monitor-command 
 
 parse_info_block(){
   awk '
-    /^[^[:space:]:]+[[:space:]]+\(#block[0-9]+\):/ {
-      device=$1
-      node=$2; gsub(/[():]/,"",node)
-      disk=$0; sub(/^[^:]+:[[:space:]]*/,"",disk); sub(/[[:space:]]+\([^)]+\).*$/,"",disk)
-      print device "\t" node "\t" disk
+    BEGIN {
+      OFS=sprintf("%c", 9)
     }
-  '
+
+    function emit() {
+      if (device != "" && disk != "") {
+        if (node == "")
+          node=device
+        print device, node, disk
+      }
+    }
+
+    # Older/common HMP format:
+    #   virtio0 (#block123): /path/to/disk (raw)
+    /^[^[:space:]:]+[[:space:]]+\(#block[0-9]+\):/ {
+      emit()
+      device=$1
+      node=$2
+      gsub(/[():]/, "", node)
+      disk=$0
+      sub(/^[^:]+:[[:space:]]*/, "", disk)
+      sub(/[[:space:]]+\([^)]+\).*$/, "", disk)
+      emit()
+      device=""; node=""; disk=""
+      next
+    }
+
+    # Minimal libvirt/QEMU HMP format:
+    #   libvirt-1-format: /dev/volgroup/kvm2644_img (raw)
+    #   drive-virtio-disk0: /path/to/disk (qcow2)
+    /^[^[:space:]][^:]*:[[:space:]]+/ {
+      emit()
+      device=$0
+      sub(/:.*/, "", device)
+      node=device
+      disk=$0
+      sub(/^[^:]+:[[:space:]]*/, "", disk)
+      sub(/[[:space:]]+\([^)]+\).*$/, "", disk)
+      next
+    }
+
+    /^[[:space:]]*node-name:[[:space:]]*/ {
+      node=$0
+      sub(/^[[:space:]]*node-name:[[:space:]]*/, "", node)
+      next
+    }
+
+    /^[[:space:]]*file:[[:space:]]*/ {
+      if (disk == "") {
+        disk=$0
+        sub(/^[[:space:]]*file:[[:space:]]*/, "", disk)
+      }
+      next
+    }
+
+    /^[[:space:]]*Attached to:[[:space:]]*/ {
+      emit()
+      device=""; node=""; disk=""
+      next
+    }
+
+    END {
+      emit()
+    }
+  ' | awk 'NF && !seen[$0]++'
 }
+
 
 block_jobs_json(){ load_config; qmp '{"execute":"query-block-jobs"}'; }
 block_jobs_empty(){
@@ -1824,64 +1883,7 @@ discover(){
   existing_disk="${SRC_DISK:-}"
   info "Reading QEMU info block for $VM_NAME"
   out="$(virsh qemu-monitor-command "$VM_NAME" --hmp "info block")"
-
-  detected="$(awk '
-    function emit_if_ready() {
-      if (disk != "" && dev != "") {
-        if (node == "")
-          node=dev
-        printf "%s\t%s\t%s\n", dev, node, disk
-      }
-    }
-
-    /^[^[:space:]].*: / {
-      emit_if_ready()
-
-      dev=$1
-      sub(/:$/, "", dev)
-      disk=""
-      node=""
-
-      # Minimal libvirt/QEMU HMP format:
-      #   libvirt-1-format: /dev/volgroup/kvm2644_img (raw)
-      #   drive-virtio-disk0: /path/to/disk (qcow2)
-      if (match($0, /: [^ ]+ \(/)) {
-        disk=$0
-        sub(/^[^:]+: /, "", disk)
-        sub(/ \(.*/, "", disk)
-      }
-
-      if (dev ~ /-format$/)
-        node=dev
-
-      next
-    }
-
-    /^[[:space:]]*node-name:/ {
-      node=$2
-      next
-    }
-
-    /^[[:space:]]*file:/ {
-      if (disk == "") {
-        disk=$0
-        sub(/^[[:space:]]*file:[[:space:]]*/, "", disk)
-      }
-      next
-    }
-
-    /^[[:space:]]*Attached to:/ {
-      emit_if_ready()
-      disk=""
-      dev=""
-      node=""
-      next
-    }
-
-    END {
-      emit_if_ready()
-    }
-  ' <<<"$out" | awk 'NF && !seen[$0]++')"
+  detected="$(parse_info_block <<<"$out")"
   [[ -n "$detected" ]] || die "Could not parse info block output"
   count="$(printf '%s\n' "$detected" | wc -l | awk '{print $1}')"
   if [[ -n "$existing_disk" ]]; then
