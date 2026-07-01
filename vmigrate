@@ -1879,14 +1879,23 @@ progress_from_jobs_json(){
 wait_jobs_empty(){
   load_config
   local out job status parsed_status progress offset len compact=0 compact_printed=0
+  local qmp_failures=0 qmp_max_failures="${VMIGRATE_QMP_WAIT_RETRIES:-5}"
   if [[ "${DEBUG:-0}" != "1" ]] && { [[ -t 1 ]] || [[ "${VMIGRATE_PROGRESS_COMPACT:-0}" == "1" ]]; }; then
     compact=1
   fi
   while true; do
     out="$(block_jobs_json)" || {
+      qmp_failures=$((qmp_failures + 1))
+      if (( qmp_failures <= qmp_max_failures )); then
+        (( compact_printed )) && printf '\n'
+        warn "QMP query timed out while waiting for block jobs; retrying ${qmp_failures}/${qmp_max_failures}"
+        sleep 3
+        continue
+      fi
       (( compact_printed )) && printf '\n'
       die "QMP query timed out or failed while waiting for block jobs"
     }
+    qmp_failures=0
     if printf '%s\n' "$out" | grep -q '"error"'; then
       (( compact_printed )) && printf '\n'
       printf '%s\n' "$out"
