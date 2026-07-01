@@ -1702,8 +1702,13 @@ format_bytes_short(){
 progress_layout(){
   local cols="${1:-${COLUMNS:-120}}"
 
-  if command -v tput >/dev/null 2>&1 && [[ -t 1 ]]; then
-    cols="$(tput cols 2>/dev/null || echo "$cols")"
+  if [[ -t 1 ]]; then
+    if command -v stty >/dev/null 2>&1; then
+      cols="$(stty size 2>/dev/null | awk '{print $2}')"
+    fi
+    if ! [[ "$cols" =~ ^[0-9]+$ ]] && command -v tput >/dev/null 2>&1; then
+      cols="$(tput cols 2>/dev/null || echo "$cols")"
+    fi
   fi
 
   [[ "$cols" =~ ^[0-9]+$ ]] || cols=120
@@ -1820,57 +1825,48 @@ progress_line(){
   len_short="${len_short// MiB/M}"
   len_short="${len_short// KiB/K}"
 
-  speed_short="${speed_short/.0 MiB\/s/M\/s}"
-  speed_short="${speed_short// MiB\/s/M\/s}"
+  speed_short="${speed_short/.0 MiB\/s/M/s}"
+  speed_short="${speed_short// MiB\/s/M/s}"
 
   case "$layout" in
 
     full)
       if [[ "$status" == "running" ]]; then
-        printf '[%s] %d%% | %s / %s | %s | elapsed %s | ETA %s' \
-          "$bar" "$pct" "$offset_h" "$len_h" "$speed_h" "$elapsed_h" "$eta_h"
+        line="[$bar] ${pct}% | ${offset_h} / ${len_h} | ${speed_h} | elapsed ${elapsed_h} | ETA ${eta_h}"
       else
-        printf '[%s] %d%% | %s | %s / %s | %s | elapsed %s | ETA %s' \
-          "$bar" "$pct" "$status" "$offset_h" "$len_h" "$speed_h" "$elapsed_h" "$eta_h"
+        line="[$bar] ${pct}% | ${status} | ${offset_h} / ${len_h} | ${speed_h} | elapsed ${elapsed_h} | ETA ${eta_h}"
       fi
       ;;
 
     compact)
-      printf '[%s] %d%% | %s/%s | %s | ETA %s' \
-        "$bar" \
-        "$pct" \
-        "$offset_short" \
-        "$len_short" \
-        "$speed_short" \
-        "$eta_h"
+      line="[$bar] ${pct}% | ${offset_short}/${len_short} | ${speed_short} | ETA ${eta_h}"
       ;;
 
     short)
-      printf '[%s] %d%% | %s/%s | ETA %s' \
-        "$bar" \
-        "$pct" \
-        "$offset_short" \
-        "$len_short" \
-        "$eta_h"
+      line="[$bar] ${pct}% | ${offset_short}/${len_short} | ETA ${eta_h}"
       ;;
 
     tiny)
-      printf '%d%% | %s/%s | ETA %s' \
-        "$pct" \
-        "$offset_short" \
-        "$len_short" \
-        "$eta_h"
+      line="${pct}% | ${offset_short}/${len_short} | ETA ${eta_h}"
       ;;
 
     *)
       if [[ "$eta_h" != "n/a" ]]; then
-        printf '%d%% | ETA %s' "$pct" "$eta_h"
+        line="${pct}% | ETA ${eta_h}"
       else
-        printf '%d%%' "$pct"
+        line="${pct}%"
       fi
       ;;
 
   esac
+
+  # Never let progress wrap when terminal/window becomes narrow.
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  if (( cols > 1 && ${#line} >= cols )); then
+    line="${line:0:$((cols-1))}"
+  fi
+
+  printf '%s' "$line"
 }
 
 progress_from_jobs_json(){
